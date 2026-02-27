@@ -1,0 +1,8 @@
+pandas
+polars
+polars-talib
+requests
+fyers-apiv3
+pyotp
+pytz
+Flask

@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Symbol Settings</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Bootstrap CSS -->
+    <link
+        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+        rel="stylesheet"
+        integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+        crossorigin="anonymous"
+    >
+    <!-- Bootstrap Icons -->
+    <link
+        href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css"
+        rel="stylesheet"
+    >
+    <style>
+        /* Light, modern dashboard theme */
+        body {
+            background: radial-gradient(circle at top left, #eef2ff 0, #f5f6ff 40%, #f9fafb 100%);
+            color: #1f2933;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        .navbar {
+            background: linear-gradient(120deg, #5b21ff, #7c3aed, #ec4899);
+            box-shadow: 0 10px 30px rgba(88, 28, 135, 0.35);
+        }
+        .navbar-brand {
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            font-size: 0.9rem;
+        }
+        .page-shell {
+            max-width: 1500px;
+            margin: 0 auto;
+        }
+        .card {
+            background-color: #ffffff;
+            border: none;
+            border-radius: 22px;
+            box-shadow: 0 24px 60px rgba(15, 23, 42, 0.16);
+        }
+        table.table {
+            border-collapse: separate;
+            border-spacing: 0;
+        }
+        /* Symbol list (table) styled similar to the edit modal: white surface, dark text */
+        table thead {
+            background-color: #ffffff;
+            color: #111827;
+        }
+        table thead th {
+            border-bottom: none;
+            font-weight: 600;
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        table tbody tr {
+            background-color: #ffffff;
+            transition: background-color 0.12s ease, transform 0.12s ease;
+        }
+        table tbody tr:nth-child(even) {
+            background-color: #f9fafb;
+        }
+        table tbody tr:hover {
+            background-color: #f3f4f6;
+            transform: translateY(-1px);
+        }
+        table tbody td {
+            border-top: none;
+            border-bottom: 1px solid #e5e7eb;
+            font-size: 0.87rem;
+            color: #111827;
+        }
+        .btn-edit,
+        .btn-trading-toggle,
+        .btn-strategy,
+        .btn-stop-strategy {
+            border-radius: 999px;
+            border: none;
+            font-weight: 500;
+            font-size: 0.8rem;
+            padding-inline: 1.1rem;
+            padding-block: 0.4rem;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.18);
+            transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
+        }
+        .btn-edit {
+            background: linear-gradient(135deg, #4f46e5, #6366f1);
+        }
+        .btn-exit-all,
+        .btn-exit-all-row {
+            background: linear-gradient(135deg, #b45309, #d97706);
+        }
+        .btn-trading-toggle {
+            background: linear-gradient(135deg, #22c1c3, #0ea5e9);
+        }
+        .btn-strategy {
+            background: linear-gradient(135deg, #22c55e, #16a34a);
+        }
+        .btn-stop-strategy {
+            background: linear-gradient(135deg, #f97316, #ec4899);
+        }
+        .btn-edit:hover,
+        .btn-exit-all:hover,
+        .btn-exit-all-row:hover,
+        .btn-trading-toggle:hover,
+        .btn-strategy:hover,
+        .btn-stop-strategy:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 12px 24px rgba(15, 23, 42, 0.22);
+            filter: brightness(1.03);
+        }
+        .modal-content {
+            background-color: #ffffff;
+            color: #111827;
+            border-radius: 18px;
+            border: none;
+            box-shadow: 0 24px 60px rgba(15, 23, 42, 0.25);
+        }
+        .form-label {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #6b7280;
+        }
+        .form-control, .form-select {
+            background-color: #ffffff;
+            color: #111827;
+            border-radius: 999px;
+            border-color: #e5e7eb;
+            font-size: 0.9rem;
+        }
+        .form-control:focus, .form-select:focus {
+            border-color: #6366f1;
+            box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.35);
+        }
+        h2.mb-0 {
+            font-weight: 800;
+            letter-spacing: 0.03em;
+            color: #111827;
+        }
+        .badge.bg-primary {
+            background: linear-gradient(135deg, #4f46e5, #6366f1) !important;
+        }
+    </style>
+</head>
+<body>
+<nav class="navbar navbar-dark mb-4">
+    <div class="container-fluid">
+        <span class="navbar-brand mb-0 h1">Kapil Spread Algo</span>
+        <div class="d-flex gap-2">
+            <button type="button" class="btn btn-sm btn-strategy text-white" title="Start Strategy" id="startStrategyBtn">
+                Start Strategy
+            </button>
+            <button type="button" class="btn btn-sm btn-stop-strategy text-white" title="Stop Strategy" id="stopStrategyBtn">
+                Stop Strategy
+            </button>
+        </div>
+    </div>
+</nav>
+
+<div class="container-fluid px-3 px-md-5 page-shell">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h2 class="mb-0">Symbol Settings</h2>
+        </div>
+        <div class="d-flex flex-column align-items-end gap-2">
+            <div class="d-flex align-items-center gap-2">
+                <small class="text-secondary">
+                    Loaded from <code>TradeSettings.csv</code>
+                </small>
+                <span id="strategyStatusBadge" class="badge bg-secondary">
+                    Strategy: Unknown
+                </span>
+            </div>
+            <div class="d-flex gap-2">
+                <button type="button" class="btn btn-outline-primary btn-sm" id="addSettingBtn" title="Add a new symbol setting">
+                    Add New Setting
+                </button>
+                <form id="importSettingsForm" action="/import-settings" method="post" enctype="multipart/form-data">
+                    <input id="importSettingsFile" name="file" type="file" accept=".csv" class="d-none">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="importSettingsBtn" title="Import settings from CSV">
+                        Import Settings
+                    </button>
+                </form>
+                <a href="/export-settings" class="btn btn-outline-secondary btn-sm" id="exportSettingsBtn" title="Download current settings as CSV">
+                    Export Settings
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <div class="card shadow-sm d-none d-md-block">
+        <div class="card-body">
+            {% if settings and settings|length > 0 %}
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                        <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Base Symbol</th>
+                            <th>Quantity</th>
+                            <th>Strike Range</th>
+                            <th>Strike Step</th>
+                            <th>Premium Up</th>
+                            <th>Premium Down</th>
+                            <th>Target</th>
+                            <th>Stop Loss</th>
+                            <th>Exp Type</th>
+                            <th>Expiry Date</th>
+                            <th>Start Time</th>
+                            <th>Stop Time</th>
+                            <th>Trading Enabled</th>
+                            <th>Trading Toggle</th>
+                            <th style="width: 1%;">Actions</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        {% for row in settings %}
+                            <tr>
+                                <td>{{ row.Symbol }}</td>
+                                <td>{{ row.BaseSymbol }}</td>
+                                <td>{{ row.Quantity }}</td>
+                                <td>{{ row.StrikeRange }}</td>
+                                <td>{{ row.StrikeStep }}</td>
+                                <td>{{ row.PremiumUp }}</td>
+                                <td>{{ row.PremiumDown }}</td>
+                                <td>{{ row.Target }}</td>
+                                <td>{{ row.StopLoss }}</td>
+                                <td>{{ row.ExpType }}</td>
+                                <td>{{ row.ExpieryDate }}</td>
+                                <td>{{ row.StartTime }}</td>
+                                <td>{{ row.StopTime }}</td>
+                                <td class="trading-flag" data-symbol="{{ row.Symbol }}">{{ row.TRADINGENABLED }}</td>
+                                <td>
+                                    <button
+                                        type="button"
+                                        class="btn btn-sm btn-trading-toggle text-white"
+                                        data-symbol="{{ row.Symbol }}"
+                                        data-basesymbol="{{ row.BaseSymbol }}"
+                                        data-tradingenabled="{{ row.TRADINGENABLED }}"
+                                        {% if row.TRADINGENABLED|string|upper == 'TRUE' %}
+                                        data-state="enabled"
+                                        {% else %}
+                                        data-state="disabled"
+                                        {% endif %}
+                                        aria-label="{% if row.TRADINGENABLED|string|upper == 'TRUE' %}Disable Trading{% else %}Enable Trading{% endif %}"
+                                        title="{% if row.TRADINGENABLED|string|upper == 'TRUE' %}Disable Trading{% else %}Enable Trading{% endif %}"
+                                    >
+                                        <span class="visually-hidden">
+                                            {% if row.TRADINGENABLED|string|upper == 'TRUE' %}
+                                                Disable trading
+                                            {% else %}
+                                                Enable trading
+                                            {% endif %}
+                                        </span>
+                                        {% if row.TRADINGENABLED|string|upper == 'TRUE' %}
+                                            <i class="bi bi-pause-fill"></i>
+                                        {% else %}
+                                            <i class="bi bi-play-fill"></i>
+                                        {% endif %}
+                                    </button>
+                                </td>
+                                <td class="text-nowrap">
+                                    <button
+                                        type="button"
+                                        class="btn btn-sm btn-delete-setting text-white me-1"
+                                        data-symbol="{{ row.Symbol }}"
+                                        aria-label="Delete symbol setting"
+                                        style="background: linear-gradient(135deg, #f97373, #ef4444);"
+                                        title="Delete Setting"
+                                    >
+                                        <span class="visually-hidden">Delete</span>
+                                        <i class="bi bi-trash-fill"></i>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="btn btn-sm btn-edit text-white"
+                                        data-bs-toggle="modal"
+                                        data-bs-target="#editModal"
+                                        data-symbol="{{ row.Symbol }}"
+                                        data-basesymbol="{{ row.BaseSymbol }}"
+                                        data-quantity="{{ row.Quantity }}"
+                                        data-strikerange="{{ row.StrikeRange }}"
+                                        data-strikestep="{{ row.StrikeStep }}"
+                                        data-premiumup="{{ row.PremiumUp }}"
+                                        data-premiumdown="{{ row.PremiumDown }}"
+                                        data-target="{{ row.Target }}"
+                                        data-stoploss="{{ row.StopLoss }}"
+                                        data-exptype="{{ row.ExpType }}"
+                                        data-expierydate="{{ row.ExpieryDate }}"
+                                        data-starttime="{{ row.StartTime }}"
+                                        data-stoptime="{{ row.StopTime }}"
+                                        data-tradingenabled="{{ row.TRADINGENABLED }}"
+                                        aria-label="Edit symbol settings"
+                                        title="Edit Setting"
+                                    >
+                                        <span class="visually-hidden">Edit</span>
+                                        <i class="bi bi-pencil-fill"></i>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="btn btn-sm btn-exit-all-row text-white ms-1"
+                                        data-symbol="{{ row.Symbol }}"
+                                        aria-label="Square off positions for symbol"
+                                        title="Square Off Positions"
+                                    >
+                                        <span class="visually-hidden">Square Off</span>
+                                        <i class="bi bi-box-arrow-right"></i>
+                                    </button>
+                                </td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if settings and settings|length > 0 %}
+        <!-- Mobile-friendly stacked cards -->
+        <div class="d-block d-md-none">
+            {% for row in settings %}
+                <div class="card shadow-sm mb-3">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h5 class="mb-0">{{ row.Symbol }}</h5>
+                            <span class="badge bg-primary">
+                                {{ row.ExpType }}
+                            </span>
+                        </div>
+                        <div class="row g-2 small text-secondary">
+                            <div class="col-12">
+                                Base:
+                                <span class="text-light">{{ row.BaseSymbol }}</span>
+                            </div>
+                            <div class="col-6">
+                                Qty:
+                                <span class="text-light">{{ row.Quantity }}</span>
+                            </div>
+                            <div class="col-6">
+                                Strike Range:
+                                <span class="text-light">{{ row.StrikeRange }}</span>
+                            </div>
+                            <div class="col-6">
+                                Strike Step:
+                                <span class="text-light">{{ row.StrikeStep }}</span>
+                            </div>
+                            <div class="col-6">
+                                Prem Up:
+                                <span class="text-light">{{ row.PremiumUp }}</span>
+                            </div>
+                            <div class="col-6">
+                                Prem Down:
+                                <span class="text-light">{{ row.PremiumDown }}</span>
+                            </div>
+                            <div class="col-6">
+                                Target:
+                                <span class="text-light">{{ row.Target }}</span>
+                            </div>
+                            <div class="col-6">
+                                Stop Loss:
+                                <span class="text-light">{{ row.StopLoss }}</span>
+                            </div>
+                            <div class="col-6">
+                                Expiry:
+                                <span class="text-light">{{ row.ExpieryDate }}</span>
+                            </div>
+                            <div class="col-6">
+                                Start:
+                                <span class="text-light">{{ row.StartTime }}</span>
+                            </div>
+                            <div class="col-6">
+                                Stop:
+                                <span class="text-light">{{ row.StopTime }}</span>
+                            </div>
+                            <div class="col-6">
+                                Enabled:
+                                <span class="text-light trading-flag" data-symbol="{{ row.Symbol }}">
+                                    {{ row.TRADINGENABLED }}
+                                </span>
+                            </div>
+                        </div>
+                        <div class="mt-3 d-flex flex-column gap-2">
+                            <div class="d-flex gap-2">
+                                <button
+                                    type="button"
+                                    class="btn btn-sm btn-delete-setting text-white flex-fill"
+                                    data-symbol="{{ row.Symbol }}"
+                                    aria-label="Delete symbol setting"
+                                    style="background: linear-gradient(135deg, #f97373, #ef4444);"
+                                    title="Delete Setting"
+                                >
+                                    <span class="visually-hidden">Delete</span>
+                                    <i class="bi bi-trash-fill"></i>
+                                </button>
+                                <button
+                                    type="button"
+                                    class="btn btn-sm btn-edit text-white flex-fill"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#editModal"
+                                    data-symbol="{{ row.Symbol }}"
+                                    data-basesymbol="{{ row.BaseSymbol }}"
+                                    data-quantity="{{ row.Quantity }}"
+                                    data-strikerange="{{ row.StrikeRange }}"
+                                    data-strikestep="{{ row.StrikeStep }}"
+                                    data-premiumup="{{ row.PremiumUp }}"
+                                        data-premiumdown="{{ row.PremiumDown }}"
+                                        data-target="{{ row.Target }}"
+                                        data-stoploss="{{ row.StopLoss }}"
+                                    data-exptype="{{ row.ExpType }}"
+                                    data-expierydate="{{ row.ExpieryDate }}"
+                                    data-starttime="{{ row.StartTime }}"
+                                    data-stoptime="{{ row.StopTime }}"
+                                    data-tradingenabled="{{ row.TRADINGENABLED }}"
+                                    aria-label="Edit symbol settings"
+                                    title="Edit Setting"
+                                >
+                                    <span class="visually-hidden">Edit</span>
+                                    <i class="bi bi-pencil-fill"></i>
+                                </button>
+                                <button
+                                    type="button"
+                                    class="btn btn-sm btn-exit-all-row text-white flex-fill"
+                                    data-symbol="{{ row.Symbol }}"
+                                    aria-label="Square off positions for symbol"
+                                    title="Square Off Positions"
+                                >
+                                    <span class="visually-hidden">Square Off</span>
+                                    <i class="bi bi-box-arrow-right"></i>
+                                </button>
+                            </div>
+                            <button
+                                type="button"
+                                class="btn btn-sm btn-trading-toggle text-white w-100"
+                                data-symbol="{{ row.Symbol }}"
+                                data-tradingenabled="{{ row.TRADINGENABLED }}"
+                                {% if row.TRADINGENABLED|string|upper == 'TRUE' %}
+                                data-state="enabled"
+                                {% else %}
+                                data-state="disabled"
+                                {% endif %}
+                                aria-label="{% if row.TRADINGENABLED|string|upper == 'TRUE' %}Disable trading{% else %}Enable trading{% endif %}"
+                            >
+                                <span class="visually-hidden">
+                                    {% if row.TRADINGENABLED|string|upper == 'TRUE' %}
+                                        Disable trading
+                                    {% else %}
+                                        Enable trading
+                                    {% endif %}
+                                </span>
+                                {% if row.TRADINGENABLED|string|upper == 'TRUE' %}
+                                    <i class="bi bi-pause-fill"></i>
+                                {% else %}
+                                    <i class="bi bi-play-fill"></i>
+                                {% endif %}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="text-center text-secondary py-5">
+            No rows found in <code>TradeSettings.csv</code>.
+        </div>
+    {% endif %}
+</div>
+
+<!-- Edit Modal -->
+<div class="modal fade" id="editModal" tabindex="-1" aria-labelledby="editModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="editModalLabel">Edit Symbol Settings</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form id="editForm">
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label class="form-label">Symbol</label>
+                            <input type="text" class="form-control" id="editSymbol" name="Symbol">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Base Symbol</label>
+                            <input type="text" class="form-control" id="editBaseSymbol" name="BaseSymbol">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Quantity</label>
+                            <input type="number" class="form-control" id="editQuantity" name="Quantity">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Strike Range</label>
+                            <input type="text" class="form-control" id="editStrikeRange" name="StrikeRange">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Strike Step</label>
+                            <input type="text" class="form-control" id="editStrikeStep" name="StrikeStep">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Premium Up</label>
+                            <input type="text" class="form-control" id="editPremiumUp" name="PremiumUp">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Premium Down</label>
+                            <input type="text" class="form-control" id="editPremiumDown" name="PremiumDown">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Target</label>
+                            <input type="text" class="form-control" id="editTarget" name="Target">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Stop Loss</label>
+                            <input type="text" class="form-control" id="editStopLoss" name="StopLoss">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Exp Type</label>
+                            <select class="form-select" id="editExpType" name="ExpType">
+                                <option value="MONTHLY">MONTHLY</option>
+                                <option value="WEEKLY">WEEKLY</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Expiry Date</label>
+                            <input type="date" class="form-control" id="editExpieryDate" name="ExpieryDate">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Start Time</label>
+                            <input type="time" class="form-control" id="editStartTime" name="StartTime">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Stop Time</label>
+                            <input type="time" class="form-control" id="editStopTime" name="StopTime">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Trading Enabled</label>
+                            <input type="text" class="form-control" id="editTradingEnabled" name="TRADINGENABLED">
+                        </div>
+                    </div>
+                </div>
+                        <input type="hidden" id="editOriginalExpieryDate">
+                        <input type="hidden" id="editOriginalSymbol">
+                        <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    <button type="submit" class="btn btn-primary">Save (UI only)</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Bootstrap JS + dependencies -->
+<script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+    integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+    crossorigin="anonymous"
+></script>
+<script>
+    // Populate modal with row data when Edit is clicked
+    const editModal = document.getElementById('editModal');
+    if (editModal) {
+        editModal.addEventListener('show.bs.modal', function (event) {
+            const button = event.relatedTarget;
+            if (!button) return;
+
+            const getAttr = (name) => button.getAttribute(name) || '';
+
+            const sym = getAttr('data-symbol');
+            document.getElementById('editSymbol').value = sym;
+            document.getElementById('editOriginalSymbol').value = sym;
+            document.getElementById('editBaseSymbol').value = getAttr('data-basesymbol');
+            document.getElementById('editQuantity').value = getAttr('data-quantity');
+            document.getElementById('editStrikeRange').value = getAttr('data-strikerange');
+            document.getElementById('editStrikeStep').value = getAttr('data-strikestep');
+            document.getElementById('editPremiumUp').value = getAttr('data-premiumup');
+            document.getElementById('editPremiumDown').value = getAttr('data-premiumdown');
+            document.getElementById('editTarget').value = getAttr('data-target');
+            document.getElementById('editStopLoss').value = getAttr('data-stoploss');
+            const expType = getAttr('data-exptype').toUpperCase();
+            document.getElementById('editExpType').value = expType === 'WEEKLY' ? 'WEEKLY' : 'MONTHLY';
+
+            const rawDate = getAttr('data-expierydate');
+            document.getElementById('editOriginalExpieryDate').value = rawDate;
+            if (rawDate && rawDate.includes('-')) {
+                const parts = rawDate.split('-'); // dd-mm-YYYY
+                if (parts.length === 3) {
+                    const [dd, mm, yyyy] = parts;
+                    document.getElementById('editExpieryDate').value = `${yyyy}-${mm.toString().padStart(2, '0')}-${dd.toString().padStart(2, '0')}`;
+                } else {
+                    document.getElementById('editExpieryDate').value = '';
+                }
+            } else {
+                document.getElementById('editExpieryDate').value = '';
+            }
+
+            document.getElementById('editStartTime').value = getAttr('data-starttime');
+            document.getElementById('editStopTime').value = getAttr('data-stoptime');
+            document.getElementById('editTradingEnabled').value = getAttr('data-tradingenabled');
+        });
+    }
+
+    const editForm = document.getElementById('editForm');
+    if (editForm) {
+        editForm.addEventListener('submit', function (e) {
+            e.preventDefault();
+
+            const payload = {
+                Symbol: document.getElementById('editSymbol').value.trim(),
+                BaseSymbol: document.getElementById('editBaseSymbol').value.trim(),
+                Quantity: document.getElementById('editQuantity').value,
+                StrikeRange: document.getElementById('editStrikeRange').value,
+                StrikeStep: document.getElementById('editStrikeStep').value,
+                PremiumUp: document.getElementById('editPremiumUp').value,
+                PremiumDown: document.getElementById('editPremiumDown').value,
+                Target: document.getElementById('editTarget').value,
+                StopLoss: document.getElementById('editStopLoss').value,
+                ExpType: document.getElementById('editExpType').value,
+                ExpieryDate: document.getElementById('editExpieryDate').value,
+                OriginalExpieryDate: document.getElementById('editOriginalExpieryDate').value,
+                OriginalSymbol: document.getElementById('editOriginalSymbol').value,
+                StartTime: document.getElementById('editStartTime').value,
+                StopTime: document.getElementById('editStopTime').value,
+                TRADINGENABLED: document.getElementById('editTradingEnabled').value,
+            };
+
+            if (!payload.Symbol) {
+                alert('Symbol is required.');
+                return;
+            }
+
+            fetch('/save-setting', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            })
+                .then((res) => {
+                    if (!res.ok) {
+                        throw new Error('Failed to save');
+                    }
+                    return res.json();
+                })
+                .then(() => {
+                    window.location.reload();
+                })
+                .catch(() => {
+                    alert('Failed to save setting.');
+                });
+        });
+    }
+
+    // Start / Stop Strategy buttons
+    const strategyStatusBadge = document.getElementById('strategyStatusBadge');
+
+    function refreshStrategyStatus() {
+        if (!strategyStatusBadge) return;
+        fetch('/strategy-status')
+            .then((res) => res.json())
+            .then((data) => {
+                const running = !!data.running;
+                strategyStatusBadge.textContent = running ? 'Strategy: Running' : 'Strategy: Stopped';
+                strategyStatusBadge.className = 'badge ' + (running ? 'bg-success' : 'bg-secondary');
+            })
+            .catch(() => {
+                strategyStatusBadge.textContent = 'Strategy: Unknown';
+                strategyStatusBadge.className = 'badge bg-secondary';
+            });
+    }
+
+    const startStrategyBtn = document.getElementById('startStrategyBtn');
+    if (startStrategyBtn) {
+        startStrategyBtn.addEventListener('click', function () {
+            fetch('/start-strategy', {
+                method: 'POST',
+            })
+                .then((res) => res.json())
+                .then((data) => {
+                    alert(`Strategy started. Subscribed option symbols: ${data.symbols ?? 'unknown'}.`);
+                    refreshStrategyStatus();
+                })
+                .catch(() => {
+                    alert('Failed to start strategy.');
+                });
+        });
+    }
+
+    const stopStrategyBtn = document.getElementById('stopStrategyBtn');
+    if (stopStrategyBtn) {
+        stopStrategyBtn.addEventListener('click', function () {
+            fetch('/stop-strategy', {
+                method: 'POST',
+            })
+                .then((res) => res.json())
+                .then(() => {
+                    alert('Strategy stopped.');
+                    refreshStrategyStatus();
+                })
+                .catch(() => {
+                    alert('Failed to stop strategy.');
+                });
+        });
+    }
+
+    // Initial status check on page load
+    refreshStrategyStatus();
+
+    // Per-row Square Off button: call stub endpoint and give user feedback
+    document.querySelectorAll('.btn-exit-all-row').forEach((btn) => {
+        btn.addEventListener('click', function () {
+            const symbol = btn.getAttribute('data-symbol') || '';
+            const confirmed = confirm(
+                symbol
+                    ? `Are you sure you want to square off all positions for ${symbol}?`
+                    : 'Are you sure you want to square off all positions for this setting?'
+            );
+            if (!confirmed) return;
+
+            fetch('/exit-all', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ symbol })
+            })
+                .then(() => {
+                    alert(`Square Off triggered for ${symbol || 'this setting'} (strategy logic will be wired later).`);
+                })
+                .catch(() => {
+                    alert('Failed to trigger Square Off endpoint.');
+                });
+        });
+    });
+
+    // Delete setting buttons: remove symbol from CSV via backend then refresh (does NOT touch live positions)
+    document.querySelectorAll('.btn-delete-setting').forEach((btn) => {
+        btn.addEventListener('click', function () {
+            const symbol = btn.getAttribute('data-symbol') || '';
+            const confirmed = confirm(
+                symbol
+                    ? `Are you sure you want to delete settings for ${symbol}? This does NOT square off any positions.`
+                    : 'Are you sure you want to delete this symbol setting? This does NOT square off any positions.'
+            );
+            if (!confirmed) return;
+
+            fetch('/delete-setting', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ symbol })
+            })
+                .then((res) => {
+                    if (!res.ok && res.status !== 204) {
+                        throw new Error('Failed');
+                    }
+                    window.location.reload();
+                })
+                .catch(() => {
+                    alert('Failed to delete symbol setting.');
+                });
+        });
+    });
+
+    // Trading toggle buttons: toggle in CSV + update UI
+    document.querySelectorAll('.btn-trading-toggle').forEach((btn) => {
+        btn.addEventListener('click', function () {
+            const symbol = btn.getAttribute('data-symbol') || '';
+            const current = (btn.getAttribute('data-tradingenabled') || '').toString().toUpperCase();
+
+            fetch('/toggle-trading', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    symbol,
+                    trading_enabled: current
+                })
+            })
+                .then((res) => res.json())
+                .then((data) => {
+                    const newEnabled = data.tradingEnabled === true;
+                    const flagText = (data.tradingEnabledRaw || (newEnabled ? 'TRUE' : 'FALSE')).toString().toUpperCase();
+                    const newText = newEnabled ? 'Disable Trading' : 'Enable Trading';
+
+                    // Update the clicked toggle button (state + icon + hidden text)
+                    btn.setAttribute('data-tradingenabled', flagText);
+                    btn.setAttribute('data-state', newEnabled ? 'enabled' : 'disabled');
+                    btn.setAttribute('aria-label', newText);
+                    btn.setAttribute('title', newText);
+
+                    const labelSpan = btn.querySelector('.visually-hidden');
+                    if (labelSpan) {
+                        labelSpan.textContent = newText;
+                    }
+                    const icon = btn.querySelector('i');
+                    if (icon) {
+                        icon.className = newEnabled ? 'bi bi-pause-fill' : 'bi bi-play-fill';
+                    }
+
+                    // Update any visible trading flag text with the same symbol (desktop + mobile)
+                    document.querySelectorAll(`.trading-flag[data-symbol="${symbol}"]`).forEach((el) => {
+                        el.textContent = flagText;
+                    });
+
+                    // Update any Edit buttons' data-tradingenabled attribute for this symbol
+                    document.querySelectorAll(`.btn-edit[data-symbol="${symbol}"]`).forEach((el) => {
+                        el.setAttribute('data-tradingenabled', flagText);
+                    });
+
+                    // Update other toggle buttons for same symbol (e.g. mobile vs desktop)
+                    document.querySelectorAll(`.btn-trading-toggle[data-symbol="${symbol}"]`).forEach((el) => {
+                        if (el === btn) return;
+                        el.setAttribute('data-tradingenabled', flagText);
+                        el.setAttribute('data-state', newEnabled ? 'enabled' : 'disabled');
+                        el.setAttribute('aria-label', newText);
+                        el.setAttribute('title', newText);
+
+                        const otherLabel = el.querySelector('.visually-hidden');
+                        if (otherLabel) {
+                            otherLabel.textContent = newText;
+                        }
+                        const otherIcon = el.querySelector('i');
+                        if (otherIcon) {
+                            otherIcon.className = newEnabled ? 'bi bi-pause-fill' : 'bi bi-play-fill';
+                        }
+                    });
+                })
+                .catch(() => {
+                    alert('Failed to toggle trading flag.');
+                });
+        });
+    });
+
+    // Import/export helpers
+    const importForm = document.getElementById('importSettingsForm');
+    const importFile = document.getElementById('importSettingsFile');
+    const importBtn = document.getElementById('importSettingsBtn');
+    if (importForm && importFile && importBtn) {
+        importBtn.addEventListener('click', function () {
+            importFile.click();
+        });
+        importFile.addEventListener('change', function () {
+            if (importFile.files && importFile.files.length > 0) {
+                importForm.submit();
+            }
+        });
+    }
+
+    // Add New Setting: open modal with empty fields (UI-only)
+    const addSettingBtn = document.getElementById('addSettingBtn');
+    if (addSettingBtn && editModal) {
+        addSettingBtn.addEventListener('click', function () {
+            const modalTitle = document.getElementById('editModalLabel');
+            if (modalTitle) {
+                modalTitle.textContent = 'Add Symbol Setting';
+            }
+            document.getElementById('editSymbol').value = '';
+            document.getElementById('editBaseSymbol').value = '';
+            document.getElementById('editQuantity').value = '';
+            document.getElementById('editStrikeRange').value = '';
+            document.getElementById('editStrikeStep').value = '';
+            document.getElementById('editPremiumUp').value = '';
+            document.getElementById('editPremiumDown').value = '';
+            document.getElementById('editTarget').value = '';
+            document.getElementById('editStopLoss').value = '';
+            document.getElementById('editExpType').value = 'MONTHLY';
+            document.getElementById('editExpieryDate').value = '';
+            document.getElementById('editOriginalExpieryDate').value = '';
+            document.getElementById('editOriginalSymbol').value = '';
+            document.getElementById('editStartTime').value = '';
+            document.getElementById('editStopTime').value = '';
+            document.getElementById('editTradingEnabled').value = 'TRUE';
+
+            const bsModal = bootstrap.Modal.getOrCreateInstance(editModal);
+            bsModal.show();
+        });
+    }
+</script>
+</body>
+</html>
+
