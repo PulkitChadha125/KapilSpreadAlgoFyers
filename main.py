@@ -1,3 +1,5 @@
+import csv
+import os
 import pandas as pd
 import datetime  # full module
 import polars as pl
@@ -198,6 +200,94 @@ app = Flask(__name__)
 strategy_running = False
 option_key_by_symbol = {}
 FyerSymbolList = []
+STATE_FILE = "state.json"
+ORDER_LOG_FILE = "order_log.csv"
+
+ORDER_LOG_COLUMNS = [
+    "timestamp",
+    "event",
+    "strategy_key",
+    "base_symbol",
+    "symbol",
+    "call_symbol",
+    "put_symbol",
+    "price_call",
+    "price_put",
+    "combined_price",
+    "target_pct",
+    "stop_pct",
+    "target_abs",
+    "stop_abs",
+    "details",
+]
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print("[STATE] Failed to read state.json:", e)
+        return {}
+
+
+def save_state(state):
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print("[STATE] Failed to write state.json:", e)
+
+
+def append_order_log(
+    event: str,
+    strategy_key: str = "",
+    base_symbol: str | None = None,
+    symbol: str | None = None,
+    call_symbol: str | None = None,
+    put_symbol: str | None = None,
+    price_call: float | None = None,
+    price_put: float | None = None,
+    combined_price: float | None = None,
+    target_pct: float | None = None,
+    stop_pct: float | None = None,
+    target_abs: float | None = None,
+    stop_abs: float | None = None,
+    details: str = "",
+) -> None:
+    """
+    Append a single event to the CSV order log in a tabular, comma-separated format.
+    """
+    try:
+        file_exists = os.path.exists(ORDER_LOG_FILE)
+        with open(ORDER_LOG_FILE, mode="a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=ORDER_LOG_COLUMNS)
+            if not file_exists:
+                writer.writeheader()
+
+            now_ts = datetime.now().isoformat(timespec="seconds")
+            row = {
+                "timestamp": now_ts,
+                "event": event,
+                "strategy_key": strategy_key,
+                "base_symbol": base_symbol or "",
+                "symbol": symbol or "",
+                "call_symbol": call_symbol or "",
+                "put_symbol": put_symbol or "",
+                "price_call": "" if price_call is None else price_call,
+                "price_put": "" if price_put is None else price_put,
+                "combined_price": "" if combined_price is None else combined_price,
+                "target_pct": "" if target_pct is None else target_pct,
+                "stop_pct": "" if stop_pct is None else stop_pct,
+                "target_abs": "" if target_abs is None else target_abs,
+                "stop_abs": "" if stop_abs is None else stop_abs,
+                "details": details,
+            }
+            writer.writerow(row)
+    except Exception as e:
+        print("[ORDER_LOG] Failed to append event:", e)
 
 
 def load_trade_settings_df():
@@ -369,11 +459,318 @@ def _strategy_loop_worker():
     Trading logic will plug into this later.
     """
     global strategy_running, FyerSymbolList
+    from FyresIntegration import shared_data  # latest LTPs from websocket
+
     while strategy_running:
-        now_ts = datetime.now()
-        snapshot_count = len(FyerSymbolList)
-        print(f"[STRATEGY TICK] {now_ts} | tracking {snapshot_count} option symbols.")
-        time.sleep(1)
+        try:
+            now_ts = datetime.now()
+            today = now_ts.date()
+            current_time = now_ts.time()
+
+            df = load_trade_settings_df()
+            if df.empty:
+                time.sleep(1)
+                continue
+
+            state = load_state()
+
+            # Ensure we work with object types to avoid casting issues
+            df = df.astype(object)
+
+            for idx, row in df.iterrows():
+                try:
+                    symbol = str(row.get("Symbol", "")).strip()
+                    base_symbol = str(row.get("BaseSymbol", "")).strip() or symbol.split(":")[-1]
+                    if not symbol:
+                        continue
+
+                    trading_enabled = str(row.get("TRADINGENABLED", "TRUE")).strip().upper()
+                    if trading_enabled != "TRUE":
+                        continue
+
+                    exp_type = str(row.get("ExpType", "MONTHLY")).strip().upper()
+                    if exp_type not in ("MONTHLY", "WEEKLY"):
+                        continue
+
+                    expiry_str = str(row.get("ExpieryDate", "")).strip()
+                    unique_key = f"{symbol}|{exp_type}|{expiry_str}"
+
+                    start_time_str = str(row.get("StartTime", "")).strip() or "09:15"
+                    stop_time_str = str(row.get("StopTime", "")).strip() or "15:30"
+                    try:
+                        start_time = datetime.strptime(start_time_str, "%H:%M").time()
+                    except Exception:
+                        start_time = datetime.strptime("09:15", "%H:%M").time()
+                    try:
+                        stop_time = datetime.strptime(stop_time_str, "%H:%M").time()
+                    except Exception:
+                        stop_time = datetime.strptime("15:30", "%H:%M").time()
+
+                    target_pct_raw = row.get("Target", 0)
+                    stop_pct_raw = row.get("StopLoss", 0)
+                    try:
+                        target_pct = float(target_pct_raw)
+                    except Exception:
+                        target_pct = 0.0
+                    try:
+                        stop_pct = float(stop_pct_raw)
+                    except Exception:
+                        stop_pct = 0.0
+
+                    srec = state.get(unique_key, {"in_position": False})
+
+                    # Stop-time forced exit
+                    if srec.get("in_position") and current_time >= stop_time:
+                        print(f"[STRATEGY] Stop time exit for {unique_key}")
+                        append_order_log(
+                            event="EXIT_STOPTIME",
+                            strategy_key=unique_key,
+                            base_symbol=base_symbol,
+                            symbol=srec.get("symbol", symbol),
+                            call_symbol=srec.get("call_symbol"),
+                            put_symbol=srec.get("put_symbol"),
+                            combined_price=srec.get("entry_combined"),
+                            target_pct=srec.get("target_pct"),
+                            stop_pct=srec.get("stop_pct"),
+                            target_abs=srec.get("target_abs"),
+                            stop_abs=srec.get("stop_abs"),
+                            details=f"Stop-time exit at {current_time} for window {start_time_str}-{stop_time_str}",
+                        )
+                        # TODO: place real square-off orders here
+                        srec["in_position"] = False
+                        state[unique_key] = srec
+                        df.at[idx, "TRADINGENABLED"] = "FALSE"
+                        continue
+
+                    # Outside start/stop window: do nothing
+                    if not (start_time <= current_time <= stop_time):
+                        continue
+
+                    # Ensure we have option symbols built for this base symbol
+                    option_list = option_key_by_symbol.get(base_symbol)
+                    if not option_list:
+                        continue
+
+                    # If not yet in position, build entry at first opportunity
+                    if not srec.get("in_position"):
+                        premium_up = row.get("PremiumUp")
+                        premium_down = row.get("PremiumDown")
+                        try:
+                            prem_up = float(premium_up)
+                        except Exception:
+                            prem_up = float("inf")
+                        try:
+                            prem_down = float(premium_down)
+                        except Exception:
+                            prem_down = 0.0
+
+                        best_ce = None
+                        best_ce_price = None
+                        best_pe = None
+                        best_pe_price = None
+
+                        for opt_symbol in option_list:
+                            ltp = shared_data.get(opt_symbol)
+                            if ltp is None:
+                                continue
+                            try:
+                                price = float(ltp)
+                            except Exception:
+                                continue
+
+                            if not (prem_down <= price <= prem_up):
+                                continue
+
+                            if opt_symbol.endswith("CE"):
+                                if best_ce_price is None or price < best_ce_price:
+                                    best_ce_price = price
+                                    best_ce = opt_symbol
+                            elif opt_symbol.endswith("PE"):
+                                if best_pe_price is None or price < best_pe_price:
+                                    best_pe_price = price
+                                    best_pe = opt_symbol
+
+                        if best_ce and best_pe:
+                            entry_combined = best_ce_price + best_pe_price
+                            target_abs = entry_combined * (target_pct / 100.0)
+                            stop_abs = entry_combined * (stop_pct / 100.0)
+
+                            print(
+                                f"[STRATEGY] ENTRY for {unique_key}: "
+                                f"CE={best_ce} @{best_ce_price}, "
+                                f"PE={best_pe} @{best_pe_price}, "
+                                f"combined={entry_combined}, "
+                                f"target+{target_abs} ({target_pct}%), "
+                                f"stop-{stop_abs} ({stop_pct}%)"
+                            )
+
+                            append_order_log(
+                                event="ENTRY",
+                                strategy_key=unique_key,
+                                base_symbol=base_symbol,
+                                symbol=symbol,
+                                call_symbol=best_ce,
+                                put_symbol=best_pe,
+                                price_call=best_ce_price,
+                                price_put=best_pe_price,
+                                combined_price=entry_combined,
+                                target_pct=target_pct,
+                                stop_pct=stop_pct,
+                                target_abs=target_abs,
+                                stop_abs=stop_abs,
+                                details="Finalized entry strikes and virtual buy for long straddle.",
+                            )
+                            # TODO: place real BUY orders for best_ce and best_pe here
+
+                            srec.update(
+                                {
+                                    "symbol": symbol,
+                                    "base_symbol": base_symbol,
+                                    "call_symbol": best_ce,
+                                    "put_symbol": best_pe,
+                                    "entry_call": best_ce_price,
+                                    "entry_put": best_pe_price,
+                                    "entry_combined": entry_combined,
+                                    "target_pct": target_pct,
+                                    "stop_pct": stop_pct,
+                                    "target_abs": target_abs,
+                                    "stop_abs": stop_abs,
+                                    "in_position": True,
+                                }
+                            )
+                            state[unique_key] = srec
+                        continue
+
+                    # If already in position, monitor for target / stop-loss
+                    if srec.get("in_position"):
+                        ce_sym = srec.get("call_symbol")
+                        pe_sym = srec.get("put_symbol")
+                        if not ce_sym or not pe_sym:
+                            continue
+
+                        ltp_ce = shared_data.get(ce_sym)
+                        ltp_pe = shared_data.get(pe_sym)
+                        if ltp_ce is None or ltp_pe is None:
+                            continue
+
+                        try:
+                            price_ce = float(ltp_ce)
+                            price_pe = float(ltp_pe)
+                        except Exception:
+                            continue
+
+                        combined = price_ce + price_pe
+                        entry_combined = srec.get("entry_combined", combined)
+
+                        # Detect live updates to Target/StopLoss in TradeSettings.csv
+                        old_target_pct = float(srec.get("target_pct", 0.0) or 0.0)
+                        old_stop_pct = float(srec.get("stop_pct", 0.0) or 0.0)
+                        new_target_pct = target_pct
+                        new_stop_pct = stop_pct
+
+                        if (new_target_pct != old_target_pct) or (new_stop_pct != old_stop_pct):
+                            new_target_abs = entry_combined * (new_target_pct / 100.0) if new_target_pct > 0 else 0.0
+                            new_stop_abs = entry_combined * (new_stop_pct / 100.0) if new_stop_pct > 0 else 0.0
+
+                            append_order_log(
+                                event="TARGET_STOPLOSS_UPDATED",
+                                strategy_key=unique_key,
+                                base_symbol=base_symbol,
+                                symbol=symbol,
+                                call_symbol=ce_sym,
+                                put_symbol=pe_sym,
+                                price_call=price_ce,
+                                price_put=price_pe,
+                                combined_price=combined,
+                                target_pct=new_target_pct,
+                                stop_pct=new_stop_pct,
+                                target_abs=new_target_abs,
+                                stop_abs=new_stop_abs,
+                                details=(
+                                    f"Targets updated while trade open. "
+                                    f"Old target={old_target_pct}%, new target={new_target_pct}%, "
+                                    f"old stop={old_stop_pct}%, new stop={new_stop_pct}%."
+                                ),
+                            )
+
+                            srec["target_pct"] = new_target_pct
+                            srec["stop_pct"] = new_stop_pct
+                            srec["target_abs"] = new_target_abs
+                            srec["stop_abs"] = new_stop_abs
+
+                        target_abs = float(srec.get("target_abs", 0.0) or 0.0)
+                        stop_abs = float(srec.get("stop_abs", 0.0) or 0.0)
+
+                        if combined >= entry_combined + target_abs and target_abs > 0:
+                            print(
+                                f"[STRATEGY] TARGET hit for {unique_key}: "
+                                f"combined={combined} >= {entry_combined + target_abs}"
+                            )
+                            append_order_log(
+                                event="EXIT_TARGET",
+                                strategy_key=unique_key,
+                                base_symbol=base_symbol,
+                                symbol=symbol,
+                                call_symbol=ce_sym,
+                                put_symbol=pe_sym,
+                                price_call=price_ce,
+                                price_put=price_pe,
+                                combined_price=combined,
+                                target_pct=srec.get("target_pct"),
+                                stop_pct=srec.get("stop_pct"),
+                                target_abs=target_abs,
+                                stop_abs=stop_abs,
+                                details="Exiting trade on target hit.",
+                            )
+                            # TODO: place real SELL orders (square-off) here
+                            srec["in_position"] = False
+                            state[unique_key] = srec
+                            df.at[idx, "TRADINGENABLED"] = "FALSE"
+                        elif combined <= entry_combined - stop_abs and stop_abs > 0:
+                            print(
+                                f"[STRATEGY] STOP-LOSS hit for {unique_key}: "
+                                f"combined={combined} <= {entry_combined - stop_abs}"
+                            )
+                            append_order_log(
+                                event="EXIT_STOPLOSS",
+                                strategy_key=unique_key,
+                                base_symbol=base_symbol,
+                                symbol=symbol,
+                                call_symbol=ce_sym,
+                                put_symbol=pe_sym,
+                                price_call=price_ce,
+                                price_put=price_pe,
+                                combined_price=combined,
+                                target_pct=srec.get("target_pct"),
+                                stop_pct=srec.get("stop_pct"),
+                                target_abs=target_abs,
+                                stop_abs=stop_abs,
+                                details="Exiting trade on stop-loss hit.",
+                            )
+                            # TODO: place real SELL orders (square-off) here
+                            srec["in_position"] = False
+                            state[unique_key] = srec
+                            df.at[idx, "TRADINGENABLED"] = "FALSE"
+
+                except Exception as inner_e:
+                    print("[STRATEGY] Error in loop for a row:", inner_e)
+                    traceback.print_exc()
+
+            # Persist any state/CSV changes for this tick
+            save_state(state)
+            try:
+                df.to_csv("TradeSettings.csv", index=False)
+            except Exception as e:
+                print("[STRATEGY] Failed to write TradeSettings.csv in loop:", e)
+
+            snapshot_count = len(FyerSymbolList)
+            print(f"[STRATEGY TICK] {now_ts} | tracking {snapshot_count} option symbols.")
+            time.sleep(1)
+
+        except Exception as loop_e:
+            print("[STRATEGY] Unexpected error in strategy loop:", loop_e)
+            traceback.print_exc()
+            time.sleep(2)
 
 
 @app.route("/strategy-status", methods=["GET"])
@@ -382,6 +779,37 @@ def strategy_status():
     Return whether strategy is currently running, plus symbol count.
     """
     return jsonify({"running": strategy_running, "symbols": len(FyerSymbolList)})
+
+
+@app.route("/strategy-positions", methods=["GET"])
+def strategy_positions():
+    """
+    Return a lightweight view of open positions created by the strategy
+    based on the state.json snapshot.
+    """
+    state = load_state()
+    positions = []
+    for key, rec in state.items():
+        if not isinstance(rec, dict):
+            continue
+        if not rec.get("in_position"):
+            continue
+        positions.append(
+            {
+                "key": key,
+                "base_symbol": rec.get("base_symbol"),
+                "symbol": rec.get("symbol"),
+                "call_symbol": rec.get("call_symbol"),
+                "put_symbol": rec.get("put_symbol"),
+                "entry_call": rec.get("entry_call"),
+                "entry_put": rec.get("entry_put"),
+                "entry_combined": rec.get("entry_combined"),
+                "target_pct": rec.get("target_pct"),
+                "stop_pct": rec.get("stop_pct"),
+            }
+        )
+
+    return jsonify(positions)
 
 
 @app.route("/start-strategy", methods=["POST"])
@@ -728,6 +1156,80 @@ def save_setting():
         return jsonify({"error": "failed to write TradeSettings.csv"}), 500
 
     return jsonify({"ok": True})
+
+
+def _read_order_log_rows():
+    """Read all rows from order_log.csv and return list of dicts (keys = column names)."""
+    if not os.path.exists(ORDER_LOG_FILE):
+        return []
+    rows = []
+    try:
+        with open(ORDER_LOG_FILE, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames:
+                for row in reader:
+                    rows.append(row)
+    except Exception as e:
+        print("[ORDER_LOG] Failed to read order_log.csv:", e)
+    return rows
+
+
+def _parse_log_date(timestamp_str):
+    """Parse timestamp from order_log (e.g. 2025-02-26T09:16:02) to date object."""
+    if not timestamp_str or not isinstance(timestamp_str, str):
+        return None
+    try:
+        part = timestamp_str.split("T")[0].strip()
+        return datetime.strptime(part, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+@app.route("/order-log")
+def order_log_page():
+    """Order Log page: shows all trading decisions from order_log.csv with time filter."""
+    return render_template("order_log.html")
+
+
+@app.route("/order-log-data", methods=["GET"])
+def order_log_data():
+    """
+    Return order log entries as JSON. Query params:
+    - filter: all | today | custom
+    - start_date, end_date: YYYY-MM-DD (required when filter=custom)
+    """
+    filter_type = (request.args.get("filter") or "all").strip().lower()
+    rows = _read_order_log_rows()
+
+    if filter_type == "today":
+        today = datetime.now().date()
+        rows = [r for r in rows if _parse_log_date(r.get("timestamp")) == today]
+    elif filter_type == "custom":
+        start_str = request.args.get("start_date", "").strip()
+        end_str = request.args.get("end_date", "").strip()
+        try:
+            start_date = datetime.strptime(start_str, "%Y-%m-%d").date() if start_str else None
+            end_date = datetime.strptime(end_str, "%Y-%m-%d").date() if end_str else None
+        except ValueError:
+            start_date = end_date = None
+        def in_range(r):
+            d = _parse_log_date(r.get("timestamp"))
+            if d is None:
+                return False
+            if start_date and end_date:
+                return start_date <= d <= end_date
+            if start_date:
+                return d >= start_date
+            if end_date:
+                return d <= end_date
+            return True
+
+        if start_date or end_date:
+            rows = [r for r in rows if in_range(r)]
+
+    # Return in reverse chronological order (newest first)
+    rows.sort(key=lambda r: r.get("timestamp") or "", reverse=True)
+    return jsonify(rows)
 
 
 @app.route("/strategy")

@@ -39,19 +39,132 @@
 <nav class="navbar navbar-dark mb-4">
     <div class="container-fluid">
         <a href="/" class="navbar-brand mb-0 h1">Kapil Spread Algo</a>
+        <div class="d-flex gap-2">
+            <a href="/" class="btn btn-sm btn-outline-light">Symbol Settings</a>
+            <a href="/strategy" class="btn btn-sm btn-light">Strategy</a>
+            <a href="/order-log" class="btn btn-sm btn-outline-light">Order Log</a>
+        </div>
     </div>
 </nav>
-<div class="container" style="max-width: 960px;">
+<div class="container" style="max-width: 1100px;">
+    <div class="card shadow-sm mb-4">
+        <div class="card-body d-flex justify-content-between align-items-center">
+            <div>
+                <h2 class="mb-1">Strategy</h2>
+                <p class="text-secondary mb-0">
+                    Overview of strategy status and open positions.
+                </p>
+            </div>
+            <div class="text-end">
+                <span class="badge bg-success" id="strategy-status-badge">Loading...</span>
+            </div>
+        </div>
+    </div>
+
     <div class="card shadow-sm">
         <div class="card-body">
-            <h2 class="mb-3">Strategy</h2>
-            <p class="text-secondary mb-0">
-                This page is reserved for your main strategy controls and monitoring.
-                The backend strategy wiring will be added here later.
-            </p>
+            <ul class="nav nav-tabs" id="strategyTabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link active" id="positions-tab" data-bs-toggle="tab"
+                            data-bs-target="#positions-pane" type="button" role="tab">
+                        Positions
+                    </button>
+                </li>
+            </ul>
+            <div class="tab-content pt-3">
+                <div class="tab-pane fade show active" id="positions-pane" role="tabpanel"
+                     aria-labelledby="positions-tab">
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead class="table-light">
+                            <tr>
+                                <th>Base Symbol</th>
+                                <th>Entry Symbol (CE)</th>
+                                <th>Entry Symbol (PE)</th>
+                                <th>Entry CE</th>
+                                <th>Entry PE</th>
+                                <th>Combined Entry</th>
+                                <th>Target %</th>
+                                <th>Stop %</th>
+                            </tr>
+                            </thead>
+                            <tbody id="positions-body">
+                            <tr>
+                                <td colspan="8" class="text-center text-secondary">
+                                    Loading positions...
+                                </td>
+                            </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 </div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    async function refreshStrategyStatus() {
+        try {
+            const res = await fetch('/strategy-status');
+            if (!res.ok) return;
+            const data = await res.json();
+            const badge = document.getElementById('strategy-status-badge');
+            if (!badge) return;
+            if (data.running) {
+                badge.classList.remove('bg-secondary', 'bg-danger');
+                badge.classList.add('bg-success');
+                badge.textContent = 'Strategy Running';
+            } else {
+                badge.classList.remove('bg-success', 'bg-danger');
+                badge.classList.add('bg-secondary');
+                badge.textContent = 'Strategy Stopped';
+            }
+        } catch (e) {
+            console.error(e);
+        }
+    }
+
+    async function refreshPositions() {
+        try {
+            const res = await fetch('/strategy-positions');
+            const body = document.getElementById('positions-body');
+            if (!body) return;
+            if (!res.ok) {
+                body.innerHTML = '<tr><td colspan="8" class="text-center text-danger">Failed to load positions.</td></tr>';
+                return;
+            }
+            const data = await res.json();
+            if (!Array.isArray(data) || data.length === 0) {
+                body.innerHTML = '<tr><td colspan="8" class="text-center text-secondary">No open positions from strategy.</td></tr>';
+                return;
+            }
+            body.innerHTML = '';
+            for (const p of data) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${p.base_symbol || ''}</td>
+                    <td><code>${p.call_symbol || ''}</code></td>
+                    <td><code>${p.put_symbol || ''}</code></td>
+                    <td>${p.entry_call ?? ''}</td>
+                    <td>${p.entry_put ?? ''}</td>
+                    <td>${p.entry_combined ?? ''}</td>
+                    <td>${p.target_pct ?? ''}</td>
+                    <td>${p.stop_pct ?? ''}</td>
+                `;
+                body.appendChild(tr);
+            }
+        } catch (e) {
+            console.error(e);
+        }
+    }
+
+    refreshStrategyStatus();
+    refreshPositions();
+    setInterval(refreshStrategyStatus, 5000);
+    setInterval(refreshPositions, 3000);
+</script>
 </body>
 </html>
 
