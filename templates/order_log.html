@@ -51,9 +51,16 @@
 
     <div class="card shadow-sm mb-3">
         <div class="card-body filter-row">
-            <label class="form-label fw-semibold">Time filter</label>
+            <label class="form-label fw-semibold">Filters</label>
             <div class="d-flex flex-wrap align-items-end gap-3">
                 <div>
+                    <label class="form-label small mb-0">Symbol</label>
+                    <select id="symbolFilter" class="form-select form-select-sm" style="width: auto;">
+                        <option value="">All symbols</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="form-label small mb-0">Time</label>
                     <select id="filterType" class="form-select form-select-sm" style="width: auto;">
                         <option value="all">All logs</option>
                         <option value="today">Today</option>
@@ -71,9 +78,12 @@
                     </div>
                     <button type="button" class="btn btn-sm btn-primary" id="applyFilterBtn">Apply</button>
                 </div>
-                <div class="ms-auto">
+                <div class="ms-auto d-flex gap-2">
                     <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshLogBtn" title="Refresh">
                         <i class="bi bi-arrow-clockwise"></i> Refresh
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-danger" id="deleteLogsBtn" title="Clear all order logs">
+                        <i class="bi bi-trash"></i> Delete all logs
                     </button>
                 </div>
             </div>
@@ -112,24 +122,63 @@
 <script>
 (function () {
     const filterType = document.getElementById('filterType');
+    const symbolFilter = document.getElementById('symbolFilter');
     const customRangeBox = document.getElementById('customRangeBox');
     const startDate = document.getElementById('startDate');
     const endDate = document.getElementById('endDate');
     const applyFilterBtn = document.getElementById('applyFilterBtn');
     const refreshLogBtn = document.getElementById('refreshLogBtn');
+    const deleteLogsBtn = document.getElementById('deleteLogsBtn');
     const logBody = document.getElementById('log-body');
+
+    function loadSymbolOptions() {
+        fetch('/order-log-symbols')
+            .then(function (res) { return res.json(); })
+            .then(function (symbols) {
+                const sel = symbolFilter;
+                const current = sel.value;
+                sel.innerHTML = '<option value="">All symbols</option>';
+                (symbols || []).forEach(function (s) {
+                    const opt = document.createElement('option');
+                    opt.value = s;
+                    opt.textContent = s;
+                    sel.appendChild(opt);
+                });
+                if (current) sel.value = current;
+            })
+            .catch(function () {});
+    }
 
     filterType.addEventListener('change', function () {
         customRangeBox.classList.toggle('d-none', this.value !== 'custom');
         if (this.value !== 'custom') loadLogs();
     });
+    symbolFilter.addEventListener('change', function () { loadLogs(); });
 
     applyFilterBtn.addEventListener('click', function () { loadLogs(); });
     refreshLogBtn.addEventListener('click', function () { loadLogs(); });
 
+    deleteLogsBtn.addEventListener('click', function () {
+        if (!confirm('Delete all order log entries? This cannot be undone.')) return;
+        deleteLogsBtn.disabled = true;
+        fetch('/order-log-delete', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                if (data.ok) {
+                    loadSymbolOptions();
+                    loadLogs();
+                } else {
+                    alert('Failed to delete logs: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(function () { alert('Failed to delete logs.'); })
+            .finally(function () { deleteLogsBtn.disabled = false; });
+    });
+
     function getQueryParams() {
         const f = filterType.value;
         const params = new URLSearchParams({ filter: f });
+        if (symbolFilter.value) params.set('base_symbol', symbolFilter.value);
         if (f === 'custom') {
             if (startDate.value) params.set('start_date', startDate.value);
             if (endDate.value) params.set('end_date', endDate.value);
@@ -146,13 +195,17 @@
                 logBody.innerHTML = '<tr><td colspan="11" class="text-center text-danger">Failed to load logs.</td></tr>';
                 return;
             }
-            if (data.length === 0) {
+            // Hide NO_STRIKE_IN_RANGE events from the web UI (still logged in CSV for audit)
+            const visible = data.filter(function (r) { return r.event !== 'NO_STRIKE_IN_RANGE'; });
+
+            if (visible.length === 0) {
                 logBody.innerHTML = '<tr><td colspan="11" class="text-center text-secondary">No log entries for this filter.</td></tr>';
                 return;
             }
-            logBody.innerHTML = data.map(function (r) {
+            logBody.innerHTML = visible.map(function (r) {
                 const eventClass = (r.event || '').indexOf('EXIT') !== -1 ? 'bg-warning text-dark' :
-                    (r.event === 'ENTRY') ? 'bg-success' : (r.event === 'TARGET_STOPLOSS_UPDATED') ? 'bg-info text-dark' : 'bg-secondary';
+                    (r.event === 'ENTRY') ? 'bg-success' : (r.event === 'TARGET_STOPLOSS_UPDATED') ? 'bg-info text-dark' :
+                    (r.event === 'NO_STRIKE_IN_RANGE') ? 'bg-secondary text-white' : 'bg-secondary';
                 return '<tr>' +
                     '<td>' + (r.timestamp || '') + '</td>' +
                     '<td><span class="badge ' + eventClass + ' event-badge">' + (r.event || '') + '</span></td>' +
@@ -172,6 +225,7 @@
         }
     }
 
+    loadSymbolOptions();
     loadLogs();
 })();
 </script>

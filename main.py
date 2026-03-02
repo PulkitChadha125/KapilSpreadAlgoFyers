@@ -1,7 +1,7 @@
 import csv
 import os
 import pandas as pd
-import datetime  # full module
+import datetime as dt  # full module for timezone-safe operations
 import polars as pl
 import polars_talib as plta
 import json
@@ -130,14 +130,15 @@ def get_user_settings():
                     PremiumUp = ""
 
                 # --- Build Fyers symbol for Weekly/Monthly options (only if expiry present) ---
+                # Note: Actual option symbol list is built in build_option_subscriptions(), not here.
                 fyers_symbol = None
                 if pd.notna(ExpieryDate):
                     expiry_str = str(ExpieryDate).strip()
                     if ExpType == "MONTHLY":
-                        # e.g., '29-05-2025' -> '25MAY'
+                        # e.g., '29-05-2025' -> '25MAY' (single symbol placeholder; full list built elsewhere)
                         expiry_date = datetime.strptime(expiry_str, '%d-%m-%Y')
                         new_date_string = expiry_date.strftime('%y%b').upper()
-                        fyers_symbol = f"NSE:{BaseSymbol}{new_date_string}{Strike}{OptionType}"
+                        fyers_symbol = f"NSE:{BaseSymbol}{new_date_string}"
                     #     if symbol == "SENSEX":
                     #         fyers_symbol = f"BSE:{symbol}{new_date_string}{Strike}{OptionType}"
                     #     print(f"fyers_symbol: {fyers_symbol}")
@@ -202,6 +203,7 @@ option_key_by_symbol = {}
 FyerSymbolList = []
 STATE_FILE = "state.json"
 ORDER_LOG_FILE = "order_log.csv"
+_last_no_strike_log = {}  # unique_key -> last log timestamp (throttle NO_STRIKE_IN_RANGE to once per 60s)
 
 ORDER_LOG_COLUMNS = [
     "timestamp",
@@ -267,7 +269,10 @@ def append_order_log(
             if not file_exists:
                 writer.writeheader()
 
-            now_ts = datetime.now().isoformat(timespec="seconds")
+            # Use Indian Standard Time (IST, UTC+5:30) for all log timestamps
+            utc_now = dt.datetime.utcnow()
+            ist_now = utc_now + dt.timedelta(hours=5, minutes=30)
+            now_ts = ist_now.strftime("%Y-%m-%dT%H:%M:%S")
             row = {
                 "timestamp": now_ts,
                 "event": event,
@@ -388,8 +393,8 @@ def build_option_subscriptions():
                 continue
 
             exp_type = str(row.get("ExpType", "MONTHLY")).strip().upper()
-            if exp_type != "MONTHLY":
-                print(f"[STRATEGY] Skipping {symbol}: ExpType {exp_type} not yet implemented for options.")
+            if exp_type not in ("MONTHLY", "WEEKLY"):
+                print(f"[STRATEGY] Skipping {symbol}: ExpType {exp_type} not supported (use MONTHLY or WEEKLY).")
                 continue
 
             underlying_symbol = _normalize_symbol_for_ltp(symbol_raw)
@@ -414,10 +419,22 @@ def build_option_subscriptions():
             option_symbols = []
             try:
                 expiry_date = datetime.strptime(expiry_str, "%d-%m-%Y")
-                new_date_string = expiry_date.strftime("%y%b").upper()
             except Exception as e:
                 print(f"[STRATEGY] Failed to parse expiry {expiry_str} for {symbol}: {e}")
                 continue
+
+            if exp_type == "MONTHLY":
+                # Monthly: NSE:NIFTY26MAR25000CE (YY + MMM + strike + CE/PE)
+                new_date_string = expiry_date.strftime("%y%b").upper()
+            else:
+                # Weekly: Fyers doc says {YY}{M}{dd} with M = 1-9 or O,N,D (e.g. NSE:NIFTY2640711000CE for 07-Apr-2026)
+                yy = expiry_date.strftime("%y")
+                mm = expiry_date.month
+                month_char = str(mm) if 1 <= mm <= 9 else {10: "O", 11: "N", 12: "D"}[mm]
+                dd = expiry_date.strftime("%d")
+                new_date_string = f"{yy}{month_char}{dd}"
+
+            unique_key = f"{symbol_raw.strip()}|{exp_type}|{expiry_str}"
 
             for strike in strikes:
                 strike_int = int(strike)
@@ -425,9 +442,9 @@ def build_option_subscriptions():
                     fyers_symbol = f"NSE:{base_symbol}{new_date_string}{strike_int}{opt_type}"
                     option_symbols.append(fyers_symbol)
 
-            option_key_by_symbol[base_symbol] = option_symbols
+            option_key_by_symbol[unique_key] = option_symbols
             FyerSymbolList.extend(option_symbols)
-            print(f"[STRATEGY] Built {len(option_symbols)} option symbols for {symbol}")
+            print(f"[STRATEGY] Built {len(option_symbols)} option symbols for {symbol} ({exp_type} {expiry_str})")
 
         except Exception as e:
             print(f"[STRATEGY] Error while building options for a row: {e}")
@@ -517,26 +534,37 @@ def _strategy_loop_worker():
                     except Exception:
                         stop_pct = 0.0
 
+                    try:
+                        quantity = int(row.get("Quantity", 1) or 1)
+                    except Exception:
+                        quantity = 1
+                    quantity = max(1, quantity)
+
                     srec = state.get(unique_key, {"in_position": False})
 
                     # Stop-time forced exit
                     if srec.get("in_position") and current_time >= stop_time:
                         print(f"[STRATEGY] Stop time exit for {unique_key}")
+                        exit_qty = srec.get("quantity", 1)
+                        ce_sym = srec.get("call_symbol")
+                        pe_sym = srec.get("put_symbol")
+                        sell_ce = place_order(ce_sym, exit_qty, -1) if ce_sym else {}
+                        sell_pe = place_order(pe_sym, exit_qty, -1) if pe_sym else {}
+                        order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
                         append_order_log(
                             event="EXIT_STOPTIME",
                             strategy_key=unique_key,
                             base_symbol=base_symbol,
                             symbol=srec.get("symbol", symbol),
-                            call_symbol=srec.get("call_symbol"),
-                            put_symbol=srec.get("put_symbol"),
+                            call_symbol=ce_sym,
+                            put_symbol=pe_sym,
                             combined_price=srec.get("entry_combined"),
                             target_pct=srec.get("target_pct"),
                             stop_pct=srec.get("stop_pct"),
                             target_abs=srec.get("target_abs"),
                             stop_abs=srec.get("stop_abs"),
-                            details=f"Stop-time exit at {current_time} for window {start_time_str}-{stop_time_str}",
+                            details=f"Exiting trade at stop time {current_time}. Placed SELL orders (qty={exit_qty}). {order_detail}",
                         )
-                        # TODO: place real square-off orders here
                         srec["in_position"] = False
                         state[unique_key] = srec
                         df.at[idx, "TRADINGENABLED"] = "FALSE"
@@ -546,8 +574,8 @@ def _strategy_loop_worker():
                     if not (start_time <= current_time <= stop_time):
                         continue
 
-                    # Ensure we have option symbols built for this base symbol
-                    option_list = option_key_by_symbol.get(base_symbol)
+                    # Ensure we have option symbols built for this row (key = Symbol|ExpType|ExpieryDate)
+                    option_list = option_key_by_symbol.get(unique_key)
                     if not option_list:
                         continue
 
@@ -578,6 +606,9 @@ def _strategy_loop_worker():
                             except Exception:
                                 continue
 
+                            # Print per-symbol LTP used for entry decisions
+                            print(f"[LTP] {unique_key} | {opt_symbol} -> {price}")
+
                             if not (prem_down <= price <= prem_up):
                                 continue
 
@@ -589,6 +620,33 @@ def _strategy_loop_worker():
                                 if best_pe_price is None or price < best_pe_price:
                                     best_pe_price = price
                                     best_pe = opt_symbol
+
+                        if not (best_ce and best_pe):
+                            # No strike in premium range - log (throttle once per 60s per key)
+                            now_sec = time.time()
+                            last = _last_no_strike_log.get(unique_key, 0)
+                            if now_sec - last >= 60:
+                                _last_no_strike_log[unique_key] = now_sec
+                                reason = []
+                                if not best_ce:
+                                    reason.append("no CE")
+                                if not best_pe:
+                                    reason.append("no PE")
+                                # Console diagnostics with visual separator
+                                print("\n" + "=" * 80)
+                                print(
+                                    f"[NO_STRIKE_IN_RANGE] {unique_key} | "
+                                    f"range [{prem_down}, {prem_up}] | missing: {', '.join(reason)}"
+                                )
+                                print("=" * 80 + "\n")
+                                append_order_log(
+                                    event="NO_STRIKE_IN_RANGE",
+                                    strategy_key=unique_key,
+                                    base_symbol=base_symbol,
+                                    symbol=symbol,
+                                    details=f"No strike in premium range [{prem_down}, {prem_up}] for {base_symbol}. Missing: {', '.join(reason)}. Waiting for LTP in range.",
+                                )
+                            continue
 
                         if best_ce and best_pe:
                             entry_combined = best_ce_price + best_pe_price
@@ -604,6 +662,15 @@ def _strategy_loop_worker():
                                 f"stop-{stop_abs} ({stop_pct}%)"
                             )
 
+                            # Place BUY orders on Fyers
+                            order_ce = place_order(best_ce, quantity, 1)
+                            order_pe = place_order(best_pe, quantity, 1)
+                            order_detail = f"CE order: {order_ce.get('message', order_ce)}; PE order: {order_pe.get('message', order_pe)}"
+                            if order_ce.get("id"):
+                                order_detail += f" [CE id={order_ce.get('id')}]"
+                            if order_pe.get("id"):
+                                order_detail += f" [PE id={order_pe.get('id')}]"
+
                             append_order_log(
                                 event="ENTRY",
                                 strategy_key=unique_key,
@@ -618,9 +685,8 @@ def _strategy_loop_worker():
                                 stop_pct=stop_pct,
                                 target_abs=target_abs,
                                 stop_abs=stop_abs,
-                                details="Finalized entry strikes and virtual buy for long straddle.",
+                                details=f"Placed BUY orders on Fyers (qty={quantity}). {order_detail}",
                             )
-                            # TODO: place real BUY orders for best_ce and best_pe here
 
                             srec.update(
                                 {
@@ -635,6 +701,7 @@ def _strategy_loop_worker():
                                     "stop_pct": stop_pct,
                                     "target_abs": target_abs,
                                     "stop_abs": stop_abs,
+                                    "quantity": quantity,
                                     "in_position": True,
                                 }
                             )
@@ -706,6 +773,10 @@ def _strategy_loop_worker():
                                 f"[STRATEGY] TARGET hit for {unique_key}: "
                                 f"combined={combined} >= {entry_combined + target_abs}"
                             )
+                            exit_qty = srec.get("quantity", 1)
+                            sell_ce = place_order(ce_sym, exit_qty, -1)
+                            sell_pe = place_order(pe_sym, exit_qty, -1)
+                            order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
                             append_order_log(
                                 event="EXIT_TARGET",
                                 strategy_key=unique_key,
@@ -720,9 +791,8 @@ def _strategy_loop_worker():
                                 stop_pct=srec.get("stop_pct"),
                                 target_abs=target_abs,
                                 stop_abs=stop_abs,
-                                details="Exiting trade on target hit.",
+                                details=f"Exiting trade on target hit. Placed SELL orders (qty={exit_qty}). {order_detail}",
                             )
-                            # TODO: place real SELL orders (square-off) here
                             srec["in_position"] = False
                             state[unique_key] = srec
                             df.at[idx, "TRADINGENABLED"] = "FALSE"
@@ -731,6 +801,10 @@ def _strategy_loop_worker():
                                 f"[STRATEGY] STOP-LOSS hit for {unique_key}: "
                                 f"combined={combined} <= {entry_combined - stop_abs}"
                             )
+                            exit_qty = srec.get("quantity", 1)
+                            sell_ce = place_order(ce_sym, exit_qty, -1)
+                            sell_pe = place_order(pe_sym, exit_qty, -1)
+                            order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
                             append_order_log(
                                 event="EXIT_STOPLOSS",
                                 strategy_key=unique_key,
@@ -745,9 +819,8 @@ def _strategy_loop_worker():
                                 stop_pct=srec.get("stop_pct"),
                                 target_abs=target_abs,
                                 stop_abs=stop_abs,
-                                details="Exiting trade on stop-loss hit.",
+                                details=f"Exiting trade on stop-loss hit. Placed SELL orders (qty={exit_qty}). {order_detail}",
                             )
-                            # TODO: place real SELL orders (square-off) here
                             srec["in_position"] = False
                             state[unique_key] = srec
                             df.at[idx, "TRADINGENABLED"] = "FALSE"
@@ -806,6 +879,8 @@ def strategy_positions():
                 "entry_combined": rec.get("entry_combined"),
                 "target_pct": rec.get("target_pct"),
                 "stop_pct": rec.get("stop_pct"),
+                "target_abs": rec.get("target_abs"),
+                "stop_abs": rec.get("stop_abs"),
             }
         )
 
@@ -867,20 +942,71 @@ def stop_strategy():
 @app.route("/exit-all", methods=["POST"])
 def exit_all():
     """
-    Exit All button endpoint.
-
-    For now this just serves as a UI stub; the actual
-    position-closing logic will be wired in later.
+    Exit All: close strategy positions (place SELL orders) and log. Optional ?symbol= or body.symbol to exit only that symbol.
     """
-    payload = {}
-    try:
-        payload = request.get_json(silent=True) or {}
-    except Exception:
-        payload = {}
+    payload = request.get_json(silent=True) or {}
+    filter_symbol = (payload.get("symbol") or request.args.get("symbol") or "").strip()
 
-    symbol = payload.get("symbol") or request.args.get("symbol")
-    print(f"[UI] Exit All requested for symbol: {symbol} (logic not implemented yet).")
+    state = load_state()
+    exited = []
+    for key, srec in list(state.items()):
+        if not isinstance(srec, dict) or not srec.get("in_position"):
+            continue
+        if filter_symbol and srec.get("symbol", "").strip() != filter_symbol and srec.get("base_symbol", "").strip() != filter_symbol:
+            continue
+        ce_sym = srec.get("call_symbol")
+        pe_sym = srec.get("put_symbol")
+        qty = srec.get("quantity", 1)
+        sell_ce = place_order(ce_sym, qty, -1) if ce_sym else {}
+        sell_pe = place_order(pe_sym, qty, -1) if pe_sym else {}
+        order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
+        append_order_log(
+            event="EXIT_BUTTON",
+            strategy_key=key,
+            base_symbol=srec.get("base_symbol"),
+            symbol=srec.get("symbol"),
+            call_symbol=ce_sym,
+            put_symbol=pe_sym,
+            combined_price=srec.get("entry_combined"),
+            target_pct=srec.get("target_pct"),
+            stop_pct=srec.get("stop_pct"),
+            details=f"Exiting trade via Exit button for strike prices {ce_sym}, {pe_sym} at qty={qty}. {order_detail}",
+        )
+        srec["in_position"] = False
+        state[key] = srec
+        exited.append(key)
+
+    if exited:
+        save_state(state)
+        _disable_trading_for_keys(exited)
+
+    print(f"[UI] Exit All: closed {len(exited)} position(s): {exited}")
     return ("", 204)
+
+
+def _disable_trading_for_keys(keys):
+    """Set TRADINGENABLED=FALSE in TradeSettings.csv for rows matching the given strategy keys (Symbol|ExpType|ExpieryDate)."""
+    try:
+        df = pd.read_csv("TradeSettings.csv")
+        df.columns = df.columns.str.strip()
+    except Exception:
+        return
+    for key in keys:
+        parts = key.split("|")
+        if len(parts) != 3:
+            continue
+        sym, exp_type, expiry = parts[0].strip(), parts[1].strip(), parts[2].strip()
+        mask = (
+            (df["Symbol"].astype(str).str.strip() == sym)
+            & (df["ExpType"].astype(str).str.strip().str.upper() == exp_type.upper())
+            & (df["ExpieryDate"].astype(str).str.strip() == expiry)
+        )
+        if mask.any():
+            df.loc[mask, "TRADINGENABLED"] = "FALSE"
+    try:
+        df.to_csv("TradeSettings.csv", index=False)
+    except Exception as e:
+        print("[UI] Failed to update TradeSettings.csv in _disable_trading_for_keys:", e)
 
 
 @app.route("/toggle-trading", methods=["POST"])
@@ -1111,15 +1237,21 @@ def save_setting():
     original_symbol = str(payload.get("OriginalSymbol", "")).strip()
     key_symbol = original_symbol or symbol
 
+    # Use ORIGINAL ExpType to find the row when user edits expiry type/date (avoids duplicates)
+    original_exp_type_raw = str(payload.get("OriginalExpType", "")).strip().upper()
+    original_exp_type = original_exp_type_raw if original_exp_type_raw in ("MONTHLY", "WEEKLY") else None
+
     start_time = str(payload.get("StartTime", "")).strip()
     stop_time = str(payload.get("StopTime", "")).strip()
 
     trading_enabled = str(payload.get("TRADINGENABLED", "TRUE")).strip().upper()
     trading_enabled = "TRUE" if trading_enabled == "TRUE" else "FALSE"
 
+    # Find row by ORIGINAL (Symbol, ExpType, ExpieryDate) so editing expiry/type updates in place
+    key_exp_type = original_exp_type if original_exp_type else exp_type
     key_mask = (
         (df["Symbol"].astype(str).str.strip() == key_symbol)
-        & (df["ExpType"].astype(str).str.strip().str.upper() == exp_type)
+        & (df["ExpType"].astype(str).str.strip().str.upper() == key_exp_type)
         & (df["ExpieryDate"].astype(str).str.strip() == original_ex_date)
     )
 
@@ -1197,9 +1329,14 @@ def order_log_data():
     Return order log entries as JSON. Query params:
     - filter: all | today | custom
     - start_date, end_date: YYYY-MM-DD (required when filter=custom)
+    - base_symbol: optional, filter by base symbol name (e.g. NIFTY, BANKNIFTY)
     """
     filter_type = (request.args.get("filter") or "all").strip().lower()
+    base_symbol_filter = (request.args.get("base_symbol") or "").strip().upper()
     rows = _read_order_log_rows()
+
+    if base_symbol_filter:
+        rows = [r for r in rows if (r.get("base_symbol") or "").strip().upper() == base_symbol_filter]
 
     if filter_type == "today":
         today = datetime.now().date()
@@ -1230,6 +1367,28 @@ def order_log_data():
     # Return in reverse chronological order (newest first)
     rows.sort(key=lambda r: r.get("timestamp") or "", reverse=True)
     return jsonify(rows)
+
+
+@app.route("/order-log-symbols", methods=["GET"])
+def order_log_symbols():
+    """Return distinct base_symbol values from order_log.csv for the symbol filter dropdown."""
+    rows = _read_order_log_rows()
+    symbols = sorted(set((r.get("base_symbol") or "").strip() for r in rows if (r.get("base_symbol") or "").strip()))
+    return jsonify(symbols)
+
+
+@app.route("/order-log-delete", methods=["POST"])
+def order_log_delete():
+    """Clear all order log entries (truncate order_log.csv to header only)."""
+    try:
+        with open(ORDER_LOG_FILE, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(ORDER_LOG_COLUMNS)
+        print("[ORDER_LOG] Cleared all log entries.")
+        return jsonify({"ok": True})
+    except Exception as e:
+        print("[ORDER_LOG] Failed to clear order log:", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/strategy")
@@ -1279,6 +1438,5 @@ def run_strategy_loop():
 
 
 if __name__ == "__main__":
-    # For now we only run the Flask UI. The trading strategy
-    # loop remains available in run_strategy_loop() for later use.
-    app.run(debug=True)
+    # Bind to 0.0.0.0 so the app is reachable from other machines (e.g. http://217.217.251.11:5000 on VPS)
+    app.run(host="0.0.0.0", port=5000, debug=True)

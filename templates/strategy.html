@@ -86,11 +86,13 @@
                                 <th>Combined Entry</th>
                                 <th>Target %</th>
                                 <th>Stop %</th>
+                                <th>Target Abs</th>
+                                <th>Stop Abs</th>
                             </tr>
                             </thead>
                             <tbody id="positions-body">
                             <tr>
-                                <td colspan="8" class="text-center text-secondary">
+                                <td colspan="10" class="text-center text-secondary">
                                     Loading positions...
                                 </td>
                             </tr>
@@ -105,6 +107,13 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
+    function fmt2(value) {
+        if (value === null || value === undefined || value === '') return '';
+        const num = Number(value);
+        if (Number.isNaN(num)) return value;
+        return num.toFixed(2);
+    }
+
     async function refreshStrategyStatus() {
         try {
             const res = await fetch('/strategy-status');
@@ -132,12 +141,12 @@
             const body = document.getElementById('positions-body');
             if (!body) return;
             if (!res.ok) {
-                body.innerHTML = '<tr><td colspan="8" class="text-center text-danger">Failed to load positions.</td></tr>';
+                body.innerHTML = '<tr><td colspan="10" class="text-center text-danger">Failed to load positions.</td></tr>';
                 return;
             }
             const data = await res.json();
             if (!Array.isArray(data) || data.length === 0) {
-                body.innerHTML = '<tr><td colspan="8" class="text-center text-secondary">No open positions from strategy.</td></tr>';
+                body.innerHTML = '<tr><td colspan="10" class="text-center text-secondary">No open positions from strategy.</td></tr>';
                 return;
             }
             body.innerHTML = '';
@@ -147,11 +156,13 @@
                     <td>${p.base_symbol || ''}</td>
                     <td><code>${p.call_symbol || ''}</code></td>
                     <td><code>${p.put_symbol || ''}</code></td>
-                    <td>${p.entry_call ?? ''}</td>
-                    <td>${p.entry_put ?? ''}</td>
-                    <td>${p.entry_combined ?? ''}</td>
+                    <td>${fmt2(p.entry_call)}</td>
+                    <td>${fmt2(p.entry_put)}</td>
+                    <td>${fmt2(p.entry_combined)}</td>
                     <td>${p.target_pct ?? ''}</td>
                     <td>${p.stop_pct ?? ''}</td>
+                    <td>${fmt2(p.target_abs)}</td>
+                    <td>${fmt2(p.stop_abs)}</td>
                 `;
                 body.appendChild(tr);
             }

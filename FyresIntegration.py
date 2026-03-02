@@ -1,3 +1,44 @@
+# Fix SSL CERTIFICATE_VERIFY_FAILED on server/Windows (unable to get local issuer certificate)
+# Apply before any Fyers/websocket imports so the library uses unverified context when connecting.
+import ssl
+try:
+    ssl._create_default_https_context = ssl._create_unverified_context
+except Exception:
+    pass
+try:
+    def _unverified_default_context(purpose=ssl.Purpose.SERVER_AUTH):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    ssl.create_default_context = _unverified_default_context
+except Exception:
+    pass
+# Fyers uses websocket-client for the data socket; patch both create_connection and WebSocketApp to disable cert verification
+try:
+    import websocket
+    _orig_create_connection = websocket.create_connection
+    def _create_connection_no_verify(*args, **kwargs):
+        kwargs.setdefault("sslopt", {})
+        if isinstance(kwargs["sslopt"], dict):
+            kwargs["sslopt"]["cert_reqs"] = ssl.CERT_NONE
+            kwargs["sslopt"].setdefault("check_hostname", False)
+        return _orig_create_connection(*args, **kwargs)
+    websocket.create_connection = _create_connection_no_verify
+
+    # WebSocketApp.run_forever also needs sslopt when it opens the connection
+    _orig_WebSocketApp = websocket.WebSocketApp
+    class _WebSocketAppNoVerify(_orig_WebSocketApp):
+        def run_forever(self, **kwargs):
+            kwargs.setdefault("sslopt", {})
+            if isinstance(kwargs["sslopt"], dict):
+                kwargs["sslopt"]["cert_reqs"] = ssl.CERT_NONE
+                kwargs["sslopt"].setdefault("check_hostname", False)
+            return _orig_WebSocketApp.run_forever(self, **kwargs)
+    websocket.WebSocketApp = _WebSocketAppNoVerify
+except Exception:
+    pass
+
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 import webbrowser
@@ -113,6 +154,40 @@ def get_orderbook():
     res = fyers.orderbook()
     return res
       ## This will provide the user with all the order realted information
+
+
+def place_order(symbol, qty, side, product_type="INTRADAY", order_type=1, limit_price=0):
+    """
+    Place an order on Fyers.
+    symbol: e.g. NSE:NIFTY26MAR25000CE
+    qty: int, lot size
+    side: 1 = Buy, -1 = Sell
+    product_type: INTRADAY (MIS) or MARGIN (NRML)
+    order_type: 1 = Market, 2 = Limit
+    limit_price: used when order_type=2
+    Returns: API response dict with 'code', 'id', 'message', etc.
+    """
+    global fyers
+    if fyers is None:
+        return {"s": "error", "code": -1, "message": "Fyers not logged in"}
+    try:
+        data = {
+            "symbol": symbol,
+            "qty": int(qty),
+            "type": int(order_type),
+            "side": int(side),
+            "productType": product_type,
+            "limitPrice": float(limit_price) if order_type == 2 else 0,
+            "stopPrice": 0,
+            "validity": "DAY",
+            "disclosedQty": 0,
+            "offlineOrder": False,
+        }
+        res = fyers.place_order(data=data)
+        return res if isinstance(res, dict) else {"s": "error", "message": str(res)}
+    except Exception as e:
+        print(f"[FYERS] place_order failed for {symbol}: {e}")
+        return {"s": "error", "code": -1, "message": str(e)}
 
 def get_tradebook():
     global fyers
@@ -373,8 +448,12 @@ def fyres_websocket(symbollist):
 
         """
         if 'symbol' in message and 'ltp' in message:
-            shared_data[message['symbol']] = message['ltp']
-            # print("shared_data: ",shared_data)
+            symbol = message['symbol']
+            ltp = message['ltp']
+            shared_data[symbol] = ltp
+            # Print live LTP stream for debugging/monitoring
+            ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"[LTP] {ts} | {symbol} -> {ltp}")
 
 
 
