@@ -474,6 +474,49 @@
             No rows found in <code>TradeSettings.csv</code>.
         </div>
     {% endif %}
+
+    <!-- Inline Strategy Positions section (same plane as Symbol Settings) -->
+    <div class="card shadow-sm mt-4 mb-5">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <div>
+                    <h5 class="mb-1">Strategy Positions</h5>
+                    <p class="mb-0 text-secondary small">
+                        Live positions from the strategy, updating every second.
+                    </p>
+                </div>
+                <span class="badge bg-secondary small" id="inlineStrategyStatusBadge">Checking...</span>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead class="table-light">
+                    <tr>
+                        <th>Base Symbol</th>
+                        <th>Entry Symbol (CE)</th>
+                        <th>Entry Symbol (PE)</th>
+                        <th>Entry CE</th>
+                        <th>Entry PE</th>
+                        <th>Combined Entry</th>
+                        <th>Target %</th>
+                        <th>Stop %</th>
+                        <th>Target Abs</th>
+                        <th>Stop Abs</th>
+                        <th>Realized P&L</th>
+                        <th>Realized P&L %</th>
+                        <th>Actions</th>
+                    </tr>
+                    </thead>
+                    <tbody id="inline-positions-body">
+                    <tr>
+                        <td colspan="13" class="text-center text-secondary">
+                            No open positions from strategy.
+                        </td>
+                    </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
 </div>
 
 <!-- Edit Modal -->
@@ -567,6 +610,13 @@
     crossorigin="anonymous"
 ></script>
 <script>
+    function fmt2(value) {
+        if (value === null || value === undefined || value === '') return '';
+        const num = Number(value);
+        if (Number.isNaN(num)) return value;
+        return num.toFixed(2);
+    }
+
     // Populate modal with row data when Edit is clicked
     const editModal = document.getElementById('editModal');
     if (editModal) {
@@ -892,6 +942,98 @@
             bsModal.show();
         });
     }
+
+    // --- Inline Strategy Positions (below Symbol Settings) ---
+    const inlineStatusBadge = document.getElementById('inlineStrategyStatusBadge');
+    const inlinePositionsBody = document.getElementById('inline-positions-body');
+
+    async function refreshInlineStrategyStatus() {
+        if (!inlineStatusBadge) return;
+        try {
+            const res = await fetch('/strategy-status');
+            if (!res.ok) return;
+            const data = await res.json();
+            const running = !!data.running;
+            inlineStatusBadge.textContent = running ? 'Strategy Running' : 'Strategy Stopped';
+            inlineStatusBadge.className = 'badge ' + (running ? 'bg-success' : 'bg-secondary');
+        } catch (e) {
+            inlineStatusBadge.textContent = 'Strategy Unknown';
+            inlineStatusBadge.className = 'badge bg-secondary';
+        }
+    }
+
+    async function refreshInlinePositions() {
+        if (!inlinePositionsBody) return;
+        try {
+            const res = await fetch('/strategy-positions');
+            if (!res.ok) {
+                inlinePositionsBody.innerHTML =
+                    '<tr><td colspan="13" class="text-center text-danger">Failed to load positions.</td></tr>';
+                return;
+            }
+            const data = await res.json();
+            if (!Array.isArray(data) || data.length === 0) {
+                inlinePositionsBody.innerHTML =
+                    '<tr><td colspan="13" class="text-center text-secondary">No open positions from strategy.</td></tr>';
+                return;
+            }
+            inlinePositionsBody.innerHTML = '';
+            for (const p of data) {
+                const tr = document.createElement('tr');
+                const pnlClass = (p.realized_pnl ?? 0) >= 0 ? 'text-success' : 'text-danger';
+                tr.innerHTML = `
+                    <td>${p.base_symbol || ''}</td>
+                    <td><code>${p.call_symbol || ''}</code></td>
+                    <td><code>${p.put_symbol || ''}</code></td>
+                    <td>${fmt2(p.entry_call)}</td>
+                    <td>${fmt2(p.entry_put)}</td>
+                    <td>${fmt2(p.entry_combined)}</td>
+                    <td>${p.target_pct ?? ''}</td>
+                    <td>${p.stop_pct ?? ''}</td>
+                    <td>${fmt2(p.target_abs)}</td>
+                    <td>${fmt2(p.stop_abs)}</td>
+                    <td class="${pnlClass}">${fmt2(p.realized_pnl)}</td>
+                    <td class="${pnlClass}">${p.realized_pnl_pct != null ? fmt2(p.realized_pnl_pct) + '%' : ''}</td>
+                    <td>
+                        <button type="button" class="btn btn-sm btn-outline-danger"
+                                onclick="exitInlinePosition('${p.base_symbol || ''}')">
+                            Exit
+                        </button>
+                    </td>
+                `;
+                inlinePositionsBody.appendChild(tr);
+            }
+        } catch (e) {
+            inlinePositionsBody.innerHTML =
+                '<tr><td colspan="13" class="text-center text-danger">Error loading positions.</td></tr>';
+        }
+    }
+
+    async function exitInlinePosition(symbol) {
+        if (!symbol) return;
+        if (!confirm('Exit position for ' + symbol + '?')) return;
+        try {
+            const res = await fetch('/exit-all', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ symbol })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (data && data.ok === false) {
+                alert('Failed to exit position: ' + (data.error || 'Unknown error'));
+            }
+            await refreshInlinePositions();
+        } catch (e) {
+            console.error(e);
+            alert('Failed to exit position.');
+        }
+    }
+
+    // Kick off inline strategy widgets on load
+    refreshInlineStrategyStatus();
+    refreshInlinePositions();
+    setInterval(refreshInlineStrategyStatus, 5000);
+    setInterval(refreshInlinePositions, 1000);
 </script>
 </body>
 </html>

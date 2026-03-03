@@ -88,11 +88,14 @@
                                 <th>Stop %</th>
                                 <th>Target Abs</th>
                                 <th>Stop Abs</th>
+                                <th>Realized P&L</th>
+                                <th>Realized P&L %</th>
+                                <th>Actions</th>
                             </tr>
                             </thead>
                             <tbody id="positions-body">
                             <tr>
-                                <td colspan="10" class="text-center text-secondary">
+                                <td colspan="13" class="text-center text-secondary">
                                     Loading positions...
                                 </td>
                             </tr>
@@ -141,12 +144,12 @@
             const body = document.getElementById('positions-body');
             if (!body) return;
             if (!res.ok) {
-                body.innerHTML = '<tr><td colspan="10" class="text-center text-danger">Failed to load positions.</td></tr>';
+                body.innerHTML = '<tr><td colspan="13" class="text-center text-danger">Failed to load positions.</td></tr>';
                 return;
             }
             const data = await res.json();
             if (!Array.isArray(data) || data.length === 0) {
-                body.innerHTML = '<tr><td colspan="10" class="text-center text-secondary">No open positions from strategy.</td></tr>';
+                body.innerHTML = '<tr><td colspan="13" class="text-center text-secondary">No open positions from strategy.</td></tr>';
                 return;
             }
             body.innerHTML = '';
@@ -163,6 +166,18 @@
                     <td>${p.stop_pct ?? ''}</td>
                     <td>${fmt2(p.target_abs)}</td>
                     <td>${fmt2(p.stop_abs)}</td>
+                    <td class="${(p.realized_pnl ?? 0) >= 0 ? 'text-success' : 'text-danger'}">
+                        ${fmt2(p.realized_pnl)}
+                    </td>
+                    <td class="${(p.realized_pnl ?? 0) >= 0 ? 'text-success' : 'text-danger'}">
+                        ${p.realized_pnl_pct != null ? fmt2(p.realized_pnl_pct) + '%' : ''}
+                    </td>
+                    <td>
+                        <button type="button" class="btn btn-sm btn-outline-danger"
+                                onclick="exitPosition('${p.base_symbol || ''}')">
+                            Exit
+                        </button>
+                    </td>
                 `;
                 body.appendChild(tr);
             }
@@ -171,10 +186,30 @@
         }
     }
 
+    async function exitPosition(symbol) {
+        if (!symbol) return;
+        if (!confirm('Exit position for ' + symbol + '?')) return;
+        try {
+            const res = await fetch('/exit-all', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ symbol })
+            });
+            const data = await res.json();
+            if (!data.ok) {
+                alert('Failed to exit position: ' + (data.error || 'Unknown error'));
+            }
+            await refreshPositions();
+        } catch (e) {
+            console.error(e);
+            alert('Failed to exit position.');
+        }
+    }
+
     refreshStrategyStatus();
     refreshPositions();
     setInterval(refreshStrategyStatus, 5000);
-    setInterval(refreshPositions, 3000);
+    setInterval(refreshPositions, 1000);
 </script>
 </body>
 </html>

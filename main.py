@@ -221,6 +221,10 @@ ORDER_LOG_COLUMNS = [
     "target_abs",
     "stop_abs",
     "details",
+    "ce_request",
+    "ce_response",
+    "pe_request",
+    "pe_response",
 ]
 
 
@@ -258,6 +262,10 @@ def append_order_log(
     target_abs: float | None = None,
     stop_abs: float | None = None,
     details: str = "",
+    ce_request: dict | None = None,
+    ce_response: dict | None = None,
+    pe_request: dict | None = None,
+    pe_response: dict | None = None,
 ) -> None:
     """
     Append a single event to the CSV order log in a tabular, comma-separated format.
@@ -289,6 +297,10 @@ def append_order_log(
                 "target_abs": "" if target_abs is None else target_abs,
                 "stop_abs": "" if stop_abs is None else stop_abs,
                 "details": details,
+                "ce_request": "" if ce_request is None else json.dumps(ce_request, ensure_ascii=False),
+                "ce_response": "" if ce_response is None else json.dumps(ce_response, ensure_ascii=False),
+                "pe_request": "" if pe_request is None else json.dumps(pe_request, ensure_ascii=False),
+                "pe_response": "" if pe_response is None else json.dumps(pe_response, ensure_ascii=False),
             }
             writer.writerow(row)
     except Exception as e:
@@ -367,6 +379,16 @@ def build_option_subscriptions():
             symbol = symbol_raw.upper()
             base_symbol = base_symbol_raw.upper() if base_symbol_raw else symbol.split(":")[-1]
 
+            # Detect exchange prefix from the symbol, default to NSE if missing.
+            # Examples:
+            #   NSE:NIFTY26MARFUT  -> prefix = "NSE"
+            #   BSE:XYZ26MARFUT    -> prefix = "BSE"
+            #   MCX:CRUDEOIL26MARFUT -> prefix = "MCX"
+            if ":" in symbol_raw:
+                prefix = symbol_raw.split(":", 1)[0].strip().upper()
+            else:
+                prefix = "NSE"
+
             trading_enabled = str(row.get("TRADINGENABLED", "TRUE")).strip().upper()
             if trading_enabled != "TRUE":
                 continue
@@ -439,7 +461,7 @@ def build_option_subscriptions():
             for strike in strikes:
                 strike_int = int(strike)
                 for opt_type in ("CE", "PE"):
-                    fyers_symbol = f"NSE:{base_symbol}{new_date_string}{strike_int}{opt_type}"
+                    fyers_symbol = f"{prefix}:{base_symbol}{new_date_string}{strike_int}{opt_type}"
                     option_symbols.append(fyers_symbol)
 
             option_key_by_symbol[unique_key] = option_symbols
@@ -548,8 +570,15 @@ def _strategy_loop_worker():
                         exit_qty = srec.get("quantity", 1)
                         ce_sym = srec.get("call_symbol")
                         pe_sym = srec.get("put_symbol")
-                        sell_ce = place_order(ce_sym, exit_qty, -1) if ce_sym else {}
-                        sell_pe = place_order(pe_sym, exit_qty, -1) if pe_sym else {}
+
+                        ltp_ce = shared_data.get(ce_sym) if ce_sym else None
+                        ltp_pe = shared_data.get(pe_sym) if pe_sym else None
+
+                        price_ce = float(ltp_ce) if ltp_ce is not None else None
+                        price_pe = float(ltp_pe) if ltp_pe is not None else None
+
+                        sell_ce = place_order(ce_sym, exit_qty, -1, order_type=1, limit_price=price_ce) if ce_sym else {}
+                        sell_pe = place_order(pe_sym, exit_qty, -1, order_type=1, limit_price=price_pe) if pe_sym else {}
                         order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
                         append_order_log(
                             event="EXIT_STOPTIME",
@@ -564,6 +593,10 @@ def _strategy_loop_worker():
                             target_abs=srec.get("target_abs"),
                             stop_abs=srec.get("stop_abs"),
                             details=f"Exiting trade at stop time {current_time}. Placed SELL orders (qty={exit_qty}). {order_detail}",
+                            ce_request=sell_ce.get("request"),
+                            ce_response=sell_ce.get("response"),
+                            pe_request=sell_pe.get("request"),
+                            pe_response=sell_pe.get("response"),
                         )
                         srec["in_position"] = False
                         state[unique_key] = srec
@@ -622,20 +655,29 @@ def _strategy_loop_worker():
                                     best_pe = opt_symbol
 
                         if not (best_ce and best_pe):
-                            # No strike in premium range - log (throttle once per 60s per key)
+                            # Always check entry condition every tick (1 second) and print to console,
+                            # but throttle CSV logging to once per 60s per strategy key.
+                            reason = []
+                            if not best_ce:
+                                reason.append("no CE")
+                            if not best_pe:
+                                reason.append("no PE")
+
+                            # Console message every second while no strike is in range
+                            print(
+                                f"[NO_STRIKE_IN_RANGE] {unique_key} | "
+                                f"range [{prem_down}, {prem_up}] | missing: {', '.join(reason)}"
+                            )
+
+                            # CSV/order_log entry at most once per 60 seconds
                             now_sec = time.time()
                             last = _last_no_strike_log.get(unique_key, 0)
                             if now_sec - last >= 60:
                                 _last_no_strike_log[unique_key] = now_sec
-                                reason = []
-                                if not best_ce:
-                                    reason.append("no CE")
-                                if not best_pe:
-                                    reason.append("no PE")
-                                # Console diagnostics with visual separator
+                                # Extra visual separator in console when we also log to CSV
                                 print("\n" + "=" * 80)
                                 print(
-                                    f"[NO_STRIKE_IN_RANGE] {unique_key} | "
+                                    f"[NO_STRIKE_IN_RANGE LOGGED] {unique_key} | "
                                     f"range [{prem_down}, {prem_up}] | missing: {', '.join(reason)}"
                                 )
                                 print("=" * 80 + "\n")
@@ -662,9 +704,9 @@ def _strategy_loop_worker():
                                 f"stop-{stop_abs} ({stop_pct}%)"
                             )
 
-                            # Place BUY orders on Fyers
-                            order_ce = place_order(best_ce, quantity, 1)
-                            order_pe = place_order(best_pe, quantity, 1)
+                            # Place BUY orders on Fyers using LTP as limit price (LIMIT orders)
+                            order_ce = place_order(best_ce, quantity, 1, order_type=1, limit_price=best_ce_price)
+                            order_pe = place_order(best_pe, quantity, 1, order_type=1, limit_price=best_pe_price)
                             order_detail = f"CE order: {order_ce.get('message', order_ce)}; PE order: {order_pe.get('message', order_pe)}"
                             if order_ce.get("id"):
                                 order_detail += f" [CE id={order_ce.get('id')}]"
@@ -686,6 +728,10 @@ def _strategy_loop_worker():
                                 target_abs=target_abs,
                                 stop_abs=stop_abs,
                                 details=f"Placed BUY orders on Fyers (qty={quantity}). {order_detail}",
+                                ce_request=order_ce.get("request"),
+                                ce_response=order_ce.get("response"),
+                                pe_request=order_pe.get("request"),
+                                pe_response=order_pe.get("response"),
                             )
 
                             srec.update(
@@ -774,8 +820,8 @@ def _strategy_loop_worker():
                                 f"combined={combined} >= {entry_combined + target_abs}"
                             )
                             exit_qty = srec.get("quantity", 1)
-                            sell_ce = place_order(ce_sym, exit_qty, -1)
-                            sell_pe = place_order(pe_sym, exit_qty, -1)
+                            sell_ce = place_order(ce_sym, exit_qty, -1, order_type=1, limit_price=price_ce)
+                            sell_pe = place_order(pe_sym, exit_qty, -1, order_type=1, limit_price=price_pe)
                             order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
                             append_order_log(
                                 event="EXIT_TARGET",
@@ -792,6 +838,10 @@ def _strategy_loop_worker():
                                 target_abs=target_abs,
                                 stop_abs=stop_abs,
                                 details=f"Exiting trade on target hit. Placed SELL orders (qty={exit_qty}). {order_detail}",
+                                ce_request=sell_ce.get("request"),
+                                ce_response=sell_ce.get("response"),
+                                pe_request=sell_pe.get("request"),
+                                pe_response=sell_pe.get("response"),
                             )
                             srec["in_position"] = False
                             state[unique_key] = srec
@@ -802,8 +852,8 @@ def _strategy_loop_worker():
                                 f"combined={combined} <= {entry_combined - stop_abs}"
                             )
                             exit_qty = srec.get("quantity", 1)
-                            sell_ce = place_order(ce_sym, exit_qty, -1)
-                            sell_pe = place_order(pe_sym, exit_qty, -1)
+                            sell_ce = place_order(ce_sym, exit_qty, -1, order_type=1, limit_price=price_ce)
+                            sell_pe = place_order(pe_sym, exit_qty, -1, order_type=1, limit_price=price_pe)
                             order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
                             append_order_log(
                                 event="EXIT_STOPLOSS",
@@ -820,6 +870,10 @@ def _strategy_loop_worker():
                                 target_abs=target_abs,
                                 stop_abs=stop_abs,
                                 details=f"Exiting trade on stop-loss hit. Placed SELL orders (qty={exit_qty}). {order_detail}",
+                                ce_request=sell_ce.get("request"),
+                                ce_response=sell_ce.get("response"),
+                                pe_request=sell_pe.get("request"),
+                                pe_response=sell_pe.get("response"),
                             )
                             srec["in_position"] = False
                             state[unique_key] = srec
@@ -860,6 +914,8 @@ def strategy_positions():
     Return a lightweight view of open positions created by the strategy
     based on the state.json snapshot.
     """
+    from FyresIntegration import shared_data  # latest LTPs from websocket
+
     state = load_state()
     positions = []
     for key, rec in state.items():
@@ -867,6 +923,47 @@ def strategy_positions():
             continue
         if not rec.get("in_position"):
             continue
+
+        ce_sym = rec.get("call_symbol")
+        pe_sym = rec.get("put_symbol")
+
+        ltp_ce = shared_data.get(ce_sym) if ce_sym else None
+        ltp_pe = shared_data.get(pe_sym) if pe_sym else None
+
+        realized_pnl = None
+        realized_pnl_pct = None
+        try:
+            qty = int(rec.get("quantity", 1) or 1)
+        except Exception:
+            qty = 1
+
+        entry_call = rec.get("entry_call")
+        entry_put = rec.get("entry_put")
+
+        try:
+            if (
+                ltp_ce is not None
+                and ltp_pe is not None
+                and entry_call is not None
+                and entry_put is not None
+            ):
+                price_ce = float(ltp_ce)
+                price_pe = float(ltp_pe)
+                e_ce = float(entry_call)
+                e_pe = float(entry_put)
+                # Realized P&L per leg = (current - entry) * quantity
+                realized_ce = (price_ce - e_ce) * qty
+                realized_pe = (price_pe - e_pe) * qty
+                realized_pnl = realized_ce + realized_pe
+
+                entry_combined = float(rec.get("entry_combined") or (e_ce + e_pe))
+                notional = entry_combined * qty if entry_combined and qty else 0
+                if notional:
+                    realized_pnl_pct = (realized_pnl / notional) * 100.0
+        except Exception:
+            realized_pnl = None
+            realized_pnl_pct = None
+
         positions.append(
             {
                 "key": key,
@@ -881,6 +978,8 @@ def strategy_positions():
                 "stop_pct": rec.get("stop_pct"),
                 "target_abs": rec.get("target_abs"),
                 "stop_abs": rec.get("stop_abs"),
+                "realized_pnl": realized_pnl,
+                "realized_pnl_pct": realized_pnl_pct,
             }
         )
 
@@ -957,11 +1056,19 @@ def exit_all():
         ce_sym = srec.get("call_symbol")
         pe_sym = srec.get("put_symbol")
         qty = srec.get("quantity", 1)
-        sell_ce = place_order(ce_sym, qty, -1) if ce_sym else {}
-        sell_pe = place_order(pe_sym, qty, -1) if pe_sym else {}
+
+        # Use latest LTP as limit price for manual exits as well
+        from FyresIntegration import shared_data as _shared_data_exit_all
+        ltp_ce = _shared_data_exit_all.get(ce_sym) if ce_sym else None
+        ltp_pe = _shared_data_exit_all.get(pe_sym) if pe_sym else None
+        price_ce = float(ltp_ce) if ltp_ce is not None else None
+        price_pe = float(ltp_pe) if ltp_pe is not None else None
+
+        sell_ce = place_order(ce_sym, qty, -1, order_type=1, limit_price=price_ce) if ce_sym else {}
+        sell_pe = place_order(pe_sym, qty, -1, order_type=1, limit_price=price_pe) if pe_sym else {}
         order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
         append_order_log(
-            event="EXIT_BUTTON",
+            event="MANUAL_EXIT",
             strategy_key=key,
             base_symbol=srec.get("base_symbol"),
             symbol=srec.get("symbol"),
@@ -971,6 +1078,10 @@ def exit_all():
             target_pct=srec.get("target_pct"),
             stop_pct=srec.get("stop_pct"),
             details=f"Exiting trade via Exit button for strike prices {ce_sym}, {pe_sym} at qty={qty}. {order_detail}",
+            ce_request=sell_ce.get("request"),
+            ce_response=sell_ce.get("response"),
+            pe_request=sell_pe.get("request"),
+            pe_response=sell_pe.get("response"),
         )
         srec["in_position"] = False
         state[key] = srec
@@ -981,7 +1092,8 @@ def exit_all():
         _disable_trading_for_keys(exited)
 
     print(f"[UI] Exit All: closed {len(exited)} position(s): {exited}")
-    return ("", 204)
+    # Return JSON so front-ends can immediately react without errors
+    return jsonify({"ok": True, "exited": exited})
 
 
 def _disable_trading_for_keys(keys):
@@ -1002,7 +1114,9 @@ def _disable_trading_for_keys(keys):
             & (df["ExpieryDate"].astype(str).str.strip() == expiry)
         )
         if mask.any():
-            df.loc[mask, "TRADINGENABLED"] = "FALSE"
+            # TRADINGENABLED may be bool or string; assign a proper bool False
+            # so pandas doesn't error when the column dtype is boolean.
+            df.loc[mask, "TRADINGENABLED"] = False
     try:
         df.to_csv("TradeSettings.csv", index=False)
     except Exception as e:
@@ -1300,6 +1414,13 @@ def _read_order_log_rows():
             reader = csv.DictReader(f)
             if reader.fieldnames:
                 for row in reader:
+                    # Older logs (before ce_request/pe_request columns were added) may have
+                    # extra CSV columns with no header. csv.DictReader stores those under
+                    # the special key None, which is not JSON-serializable when Flask
+                    # tries to jsonify the list (it attempts to sort keys and hits
+                    # None vs str). Drop that key to keep rows safe for JSON.
+                    if None in row:
+                        del row[None]
                     rows.append(row)
     except Exception as e:
         print("[ORDER_LOG] Failed to read order_log.csv:", e)

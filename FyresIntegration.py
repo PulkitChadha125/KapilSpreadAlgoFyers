@@ -163,13 +163,25 @@ def place_order(symbol, qty, side, product_type="INTRADAY", order_type=1, limit_
     qty: int, lot size
     side: 1 = Buy, -1 = Sell
     product_type: INTRADAY (MIS) or MARGIN (NRML)
-    order_type: 1 = Market, 2 = Limit
+    order_type:
+      1 = Limit
+      2 = Market
     limit_price: used when order_type=2
-    Returns: API response dict with 'code', 'id', 'message', etc.
+
+    Returns a wrapped dict:
+      {
+        "request": <dict sent to fyers.place_order>,
+        "response": <raw API response dict>,
+        "message": <response['message'] or str(response)>,
+        "id": <response['id'] if present>,
+        "code": <response['code'] if present>,
+        "s": <response['s'] if present>,
+      }
+    Existing callers using .get('message') / .get('id') continue to work.
     """
     global fyers
     if fyers is None:
-        return {"s": "error", "code": -1, "message": "Fyers not logged in"}
+        return {"s": "error", "code": -1, "message": "Fyers not logged in", "request": None, "response": None}
     try:
         data = {
             "symbol": symbol,
@@ -177,17 +189,27 @@ def place_order(symbol, qty, side, product_type="INTRADAY", order_type=1, limit_
             "type": int(order_type),
             "side": int(side),
             "productType": product_type,
-            "limitPrice": float(limit_price) if order_type == 2 else 0,
+            # For LIMIT orders (type=1), send the provided limit_price.
+            # For MARKET orders (type=2), broker expects limitPrice = 0.
+            "limitPrice": float(limit_price) if int(order_type) == 1 and limit_price is not None else 0,
             "stopPrice": 0,
             "validity": "DAY",
             "disclosedQty": 0,
             "offlineOrder": False,
         }
         res = fyers.place_order(data=data)
-        return res if isinstance(res, dict) else {"s": "error", "message": str(res)}
+        res_dict = res if isinstance(res, dict) else {"raw": str(res)}
+        return {
+            "request": data,
+            "response": res_dict,
+            "message": res_dict.get("message", str(res_dict)),
+            "id": res_dict.get("id"),
+            "code": res_dict.get("code"),
+            "s": res_dict.get("s"),
+        }
     except Exception as e:
         print(f"[FYERS] place_order failed for {symbol}: {e}")
-        return {"s": "error", "code": -1, "message": str(e)}
+        return {"s": "error", "code": -1, "message": str(e), "request": None, "response": None}
 
 def get_tradebook():
     global fyers
