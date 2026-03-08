@@ -2,6 +2,7 @@ import csv
 import os
 import pandas as pd
 import datetime as dt  # full module for timezone-safe operations
+import math
 import polars as pl
 import polars_talib as plta
 import json
@@ -204,6 +205,8 @@ FyerSymbolList = []
 STATE_FILE = "state.json"
 ORDER_LOG_FILE = "order_log.csv"
 _last_no_strike_log = {}  # unique_key -> last log timestamp (throttle NO_STRIKE_IN_RANGE to once per 60s)
+_last_login_date = None  # date of last successful Fyers login (IST)
+_login_creds = {}        # cached credentials for automated_login
 
 ORDER_LOG_COLUMNS = [
     "timestamp",
@@ -497,11 +500,25 @@ def _strategy_loop_worker():
     Simple loop that, once per second, logs the latest LTP for all subscribed options.
     Trading logic will plug into this later.
     """
-    global strategy_running, FyerSymbolList
+    global strategy_running, FyerSymbolList, _last_login_date, _login_creds
     from FyresIntegration import shared_data  # latest LTPs from websocket
 
     while strategy_running:
         try:
+            # Scheduled daily Fyers re-login at 09:00 IST using cached credentials.
+            try:
+                if _login_creds:
+                    ist_now = dt.datetime.utcnow() + dt.timedelta(hours=5, minutes=30)
+                    ist_today = ist_now.date()
+                    ist_time = ist_now.time()
+                    if ist_time >= dt.time(9, 0) and (_last_login_date is None or _last_login_date < ist_today):
+                        print(f"[LOGIN] Performing scheduled daily Fyers re-login at {ist_now.isoformat()}")
+                        automated_login(**_login_creds)
+                        _last_login_date = ist_today
+            except Exception as re_login_err:
+                print("[LOGIN] Scheduled daily re-login failed:", re_login_err)
+                traceback.print_exc()
+
             now_ts = datetime.now()
             today = now_ts.date()
             current_time = now_ts.time()
@@ -551,9 +568,14 @@ def _strategy_loop_worker():
                         target_pct = float(target_pct_raw)
                     except Exception:
                         target_pct = 0.0
+                    # Treat NaN or empty as 0 (i.e. "not provided")
+                    if math.isnan(target_pct):
+                        target_pct = 0.0
                     try:
                         stop_pct = float(stop_pct_raw)
                     except Exception:
+                        stop_pct = 0.0
+                    if math.isnan(stop_pct):
                         stop_pct = 0.0
 
                     try:
@@ -598,8 +620,9 @@ def _strategy_loop_worker():
                             pe_request=sell_pe.get("request"),
                             pe_response=sell_pe.get("response"),
                         )
+                        # Position is fully closed; clear this strategy key from state
                         srec["in_position"] = False
-                        state[unique_key] = srec
+                        _clear_state_for_key(state, unique_key)
                         df.at[idx, "TRADINGENABLED"] = "FALSE"
                         continue
 
@@ -734,24 +757,23 @@ def _strategy_loop_worker():
                                 pe_response=order_pe.get("response"),
                             )
 
-                            srec.update(
-                                {
-                                    "symbol": symbol,
-                                    "base_symbol": base_symbol,
-                                    "call_symbol": best_ce,
-                                    "put_symbol": best_pe,
-                                    "entry_call": best_ce_price,
-                                    "entry_put": best_pe_price,
-                                    "entry_combined": entry_combined,
-                                    "target_pct": target_pct,
-                                    "stop_pct": stop_pct,
-                                    "target_abs": target_abs,
-                                    "stop_abs": stop_abs,
-                                    "quantity": quantity,
-                                    "in_position": True,
-                                }
-                            )
-                            state[unique_key] = srec
+                            # Use a fresh state dict for this position so we never carry over stale
+                            # entry_combined/target_abs from a previous cycle.
+                            state[unique_key] = {
+                                "symbol": symbol,
+                                "base_symbol": base_symbol,
+                                "call_symbol": best_ce,
+                                "put_symbol": best_pe,
+                                "entry_call": best_ce_price,
+                                "entry_put": best_pe_price,
+                                "entry_combined": entry_combined,
+                                "target_pct": target_pct,
+                                "stop_pct": stop_pct,
+                                "target_abs": target_abs,
+                                "stop_abs": stop_abs,
+                                "quantity": quantity,
+                                "in_position": True,
+                            }
                         continue
 
                     # If already in position, monitor for target / stop-loss
@@ -778,8 +800,13 @@ def _strategy_loop_worker():
                         # Detect live updates to Target/StopLoss in TradeSettings.csv
                         old_target_pct = float(srec.get("target_pct", 0.0) or 0.0)
                         old_stop_pct = float(srec.get("stop_pct", 0.0) or 0.0)
-                        new_target_pct = target_pct
-                        new_stop_pct = stop_pct
+                        if math.isnan(old_target_pct):
+                            old_target_pct = 0.0
+                        if math.isnan(old_stop_pct):
+                            old_stop_pct = 0.0
+
+                        new_target_pct = 0.0 if math.isnan(target_pct) else target_pct
+                        new_stop_pct = 0.0 if math.isnan(stop_pct) else stop_pct
 
                         if (new_target_pct != old_target_pct) or (new_stop_pct != old_stop_pct):
                             new_target_abs = entry_combined * (new_target_pct / 100.0) if new_target_pct > 0 else 0.0
@@ -843,8 +870,9 @@ def _strategy_loop_worker():
                                 pe_request=sell_pe.get("request"),
                                 pe_response=sell_pe.get("response"),
                             )
+                            # Target hit; clear this strategy key so a future re-enable starts fresh
                             srec["in_position"] = False
-                            state[unique_key] = srec
+                            _clear_state_for_key(state, unique_key)
                             df.at[idx, "TRADINGENABLED"] = "FALSE"
                         elif combined <= entry_combined - stop_abs and stop_abs > 0:
                             print(
@@ -875,8 +903,9 @@ def _strategy_loop_worker():
                                 pe_request=sell_pe.get("request"),
                                 pe_response=sell_pe.get("response"),
                             )
+                            # Stop-loss hit; clear this strategy key so a future re-enable starts fresh
                             srec["in_position"] = False
-                            state[unique_key] = srec
+                            _clear_state_for_key(state, unique_key)
                             df.at[idx, "TRADINGENABLED"] = "FALSE"
 
                 except Exception as inner_e:
@@ -995,27 +1024,33 @@ def start_strategy():
       - start websocket subscription
       - start background strategy loop
     """
-    global strategy_running
+    global strategy_running, _login_creds, _last_login_date
 
     if strategy_running:
         return jsonify({"ok": True, "message": "Strategy already running"})
 
     creds = get_api_credentials_Fyers()
-    redirect_uri = creds.get('redirect_uri')
-    client_id = creds.get('client_id')
-    secret_key = creds.get('secret_key')
-    TOTP_KEY = creds.get('totpkey')
-    FY_ID = creds.get('FY_ID')
-    PIN = creds.get('PIN')
+    redirect_uri = creds.get("redirect_uri")
+    client_id = creds.get("client_id")
+    secret_key = creds.get("secret_key")
+    TOTP_KEY = creds.get("totpkey")
+    FY_ID = creds.get("FY_ID")
+    PIN = creds.get("PIN")
 
-    automated_login(
-        client_id=client_id,
-        redirect_uri=redirect_uri,
-        secret_key=secret_key,
-        FY_ID=FY_ID,
-        PIN=PIN,
-        TOTP_KEY=TOTP_KEY,
-    )
+    # Cache credentials for scheduled daily re-login at 09:00 IST
+    _login_creds = {
+        "client_id": client_id,
+        "secret_key": secret_key,
+        "FY_ID": FY_ID,
+        "TOTP_KEY": TOTP_KEY,
+        "PIN": PIN,
+        "redirect_uri": redirect_uri,
+    }
+
+    automated_login(**_login_creds)
+    # Remember today's login date in IST so the 09:00 IST scheduler can compare correctly.
+    ist_now = dt.datetime.utcnow() + dt.timedelta(hours=5, minutes=30)
+    _last_login_date = ist_now.date()
 
     build_option_subscriptions()
 
@@ -1083,8 +1118,9 @@ def exit_all():
             pe_request=sell_pe.get("request"),
             pe_response=sell_pe.get("response"),
         )
+        # Manual Exit All: position is closed, so clear the strategy key from state
         srec["in_position"] = False
-        state[key] = srec
+        _clear_state_for_key(state, key)
         exited.append(key)
 
     if exited:
@@ -1121,6 +1157,36 @@ def _disable_trading_for_keys(keys):
         df.to_csv("TradeSettings.csv", index=False)
     except Exception as e:
         print("[UI] Failed to update TradeSettings.csv in _disable_trading_for_keys:", e)
+
+
+def _clear_state_for_key(state: dict, key: str) -> None:
+    """
+    Remove a strategy key from the in-memory state dict when its position is closed.
+    """
+    try:
+        if key in state:
+            del state[key]
+    except Exception as e:
+        print(f"[STATE] Failed to clear state for key {key}:", e)
+
+
+def _clear_state_for_symbol(symbol: str) -> None:
+    """
+    Clear all state entries for a given symbol (disable → enable).
+    State keys are "Symbol|ExpType|ExpieryDate"; we remove any key starting with symbol + "|"
+    so the next entry uses fresh LTP and computed target/stop.
+    """
+    try:
+        state = load_state()
+        prefix = symbol.strip() + "|"
+        keys_to_del = [k for k in state if isinstance(k, str) and k.startswith(prefix)]
+        for k in keys_to_del:
+            del state[k]
+        if keys_to_del:
+            save_state(state)
+            print(f"[STATE] Cleared state for symbol {symbol!r}: keys {keys_to_del}")
+    except Exception as e:
+        print(f"[STATE] Failed to clear state for symbol {symbol!r}:", e)
 
 
 @app.route("/toggle-trading", methods=["POST"])
@@ -1165,6 +1231,11 @@ def toggle_trading():
     except Exception as e:
         print("[UI] Failed to write TradeSettings.csv in toggle_trading:", e)
         return jsonify({"error": "failed to write TradeSettings.csv"}), 500
+
+    # When turning disabled → enabled, clear state for this symbol so the next entry
+    # uses fresh LTP and computed target/stop (no stale entry/target from previous cycle).
+    if new_raw == "TRUE":
+        _clear_state_for_symbol(symbol)
 
     new_enabled = new_raw == "TRUE"
     print(f"[UI] Toggle trading for {symbol}: {current_raw} -> {new_raw}")
@@ -1401,6 +1472,12 @@ def save_setting():
         print("[UI] Failed to write TradeSettings.csv in save_setting:", e)
         return jsonify({"error": "failed to write TradeSettings.csv"}), 500
 
+    # When enabling trading for this row, clear its state so next entry uses fresh LTP/target/stop.
+    if trading_enabled == "TRUE":
+        state = load_state()
+        _clear_state_for_key(state, f"{symbol}|{exp_type}|{ex_date_out}")
+        save_state(state)
+
     return jsonify({"ok": True})
 
 
@@ -1560,4 +1637,4 @@ def run_strategy_loop():
 
 if __name__ == "__main__":
     # Bind to 0.0.0.0 so the app is reachable from other machines (e.g. http://217.217.251.11:5000 on VPS)
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=3000, debug=True)
