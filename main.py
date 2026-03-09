@@ -225,6 +225,7 @@ ORDER_LOG_COLUMNS = [
     "stop_abs",
     "pnl_abs",
     "pnl_pct",
+    "pnl_amount",
     "details",
     "ce_request",
     "ce_response",
@@ -281,6 +282,7 @@ def append_order_log(
     stop_abs: float | None = None,
     pnl_abs: float | None = None,
     pnl_pct: float | None = None,
+    pnl_amount: float | None = None,
     details: str = "",
     ce_request: dict | None = None,
     ce_response: dict | None = None,
@@ -318,6 +320,7 @@ def append_order_log(
                 "stop_abs": "" if stop_abs is None else stop_abs,
                 "pnl_abs": "" if pnl_abs is None else pnl_abs,
                 "pnl_pct": "" if pnl_pct is None else pnl_pct,
+                "pnl_amount": "" if pnl_amount is None else pnl_amount,
                 "details": details,
                 "ce_request": "" if ce_request is None else json.dumps(ce_request, ensure_ascii=False),
                 "ce_response": "" if ce_response is None else json.dumps(ce_response, ensure_ascii=False),
@@ -644,6 +647,7 @@ def _strategy_loop_worker():
                         sell_ce = place_order(ce_sym, exit_qty, -1, order_type=1, limit_price=price_ce) if ce_sym else {}
                         sell_pe = place_order(pe_sym, exit_qty, -1, order_type=1, limit_price=price_pe) if pe_sym else {}
                         order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
+                        pnl_amount = pnl_abs * exit_qty if pnl_abs is not None else None
                         append_order_log(
                             event="EXIT_STOPTIME",
                             strategy_key=unique_key,
@@ -660,6 +664,7 @@ def _strategy_loop_worker():
                             stop_abs=srec.get("stop_abs"),
                             pnl_abs=pnl_abs,
                             pnl_pct=pnl_pct,
+                            pnl_amount=pnl_amount,
                             # Keep details focused on raw API messages for CE/PE
                             details=order_detail,
                             ce_request=sell_ce.get("request"),
@@ -910,6 +915,7 @@ def _strategy_loop_worker():
 
                             pnl_abs = combined - entry_combined if entry_combined else None
                             pnl_pct = (pnl_abs / entry_combined) * 100.0 if (pnl_abs is not None and entry_combined) else None
+                            pnl_amount = pnl_abs * exit_qty if pnl_abs is not None else None
 
                             append_order_log(
                                 event="EXIT_TARGET",
@@ -927,6 +933,7 @@ def _strategy_loop_worker():
                                 stop_abs=stop_abs,
                                 pnl_abs=pnl_abs,
                                 pnl_pct=pnl_pct,
+                                pnl_amount=pnl_amount,
                                 details=order_detail,
                                 ce_request=sell_ce.get("request"),
                                 ce_response=sell_ce.get("response"),
@@ -949,6 +956,7 @@ def _strategy_loop_worker():
 
                             pnl_abs = combined - entry_combined if entry_combined else None
                             pnl_pct = (pnl_abs / entry_combined) * 100.0 if (pnl_abs is not None and entry_combined) else None
+                            pnl_amount = pnl_abs * exit_qty if pnl_abs is not None else None
 
                             append_order_log(
                                 event="EXIT_STOPLOSS",
@@ -966,6 +974,7 @@ def _strategy_loop_worker():
                                 stop_abs=stop_abs,
                                 pnl_abs=pnl_abs,
                                 pnl_pct=pnl_pct,
+                                pnl_amount=pnl_amount,
                                 details=order_detail,
                                 ce_request=sell_ce.get("request"),
                                 ce_response=sell_ce.get("response"),
@@ -1179,9 +1188,11 @@ def exit_all():
         entry_combined = float(srec.get("entry_combined") or 0.0)
         pnl_abs = None
         pnl_pct = None
+        pnl_amount = None
         if exit_combined is not None and entry_combined:
             pnl_abs = exit_combined - entry_combined
             pnl_pct = (pnl_abs / entry_combined) * 100.0
+            pnl_amount = pnl_abs * qty
 
         sell_ce = place_order(ce_sym, qty, -1, order_type=1, limit_price=price_ce) if ce_sym else {}
         sell_pe = place_order(pe_sym, qty, -1, order_type=1, limit_price=price_pe) if pe_sym else {}
@@ -1200,6 +1211,7 @@ def exit_all():
             stop_pct=srec.get("stop_pct"),
             pnl_abs=pnl_abs,
             pnl_pct=pnl_pct,
+            pnl_amount=pnl_amount,
             details=order_detail,
             ce_request=sell_ce.get("request"),
             ce_response=sell_ce.get("response"),

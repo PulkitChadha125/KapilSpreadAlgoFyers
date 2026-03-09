@@ -51,9 +51,17 @@
 
 <div class="container-fluid px-3 px-md-5" style="max-width: 1600px;">
     <div class="card shadow-sm mb-2 page-header-card">
-        <div class="card-body">
-            <h2 class="mb-2">Order Log</h2>
-            <p class="text-secondary mb-0">All trading decisions from the strategy (entries, target/stop updates, exits).</p>
+        <div class="card-body d-flex flex-wrap align-items-center justify-content-between">
+            <div>
+                <h2 class="mb-1">Order Log</h2>
+                <p class="text-secondary mb-0">All trading decisions from the strategy (entries, target/stop updates, exits).</p>
+            </div>
+            <div class="mt-2 mt-md-0">
+                <span class="fw-semibold me-1">Net PnL:</span>
+                <span id="netPnlLabel" class="badge bg-light text-dark border border-secondary-subtle px-3 py-2">
+                    0.00
+                </span>
+            </div>
         </div>
     </div>
 
@@ -116,11 +124,12 @@
                             <th>Stop %</th>
                             <th>PNL (pts)</th>
                             <th>PNL %</th>
+                            <th>PNL Amt</th>
                             <th>Details</th>
                         </tr>
                     </thead>
                     <tbody id="log-body">
-                        <tr><td colspan="13" class="text-center text-secondary">Loading...</td></tr>
+                        <tr><td colspan="14" class="text-center text-secondary">Loading...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -196,6 +205,7 @@
     const refreshLogBtn = document.getElementById('refreshLogBtn');
     const deleteLogsBtn = document.getElementById('deleteLogsBtn');
     const logBody = document.getElementById('log-body');
+    const netPnlLabel = document.getElementById('netPnlLabel');
     const modalEl = document.getElementById('orderDetailsModal');
     const modal = modalEl ? new bootstrap.Modal(modalEl) : null;
     const metaEl = document.getElementById('orderDetailsMeta');
@@ -298,23 +308,25 @@
     }
 
     async function loadLogs() {
-        logBody.innerHTML = '<tr><td colspan="13" class="text-center text-secondary">Loading...</td></tr>';
+        logBody.innerHTML = '<tr><td colspan="14" class="text-center text-secondary">Loading...</td></tr>';
         try {
             const res = await fetch('/order-log-data?' + getQueryParams());
             const data = await res.json();
             if (!Array.isArray(data)) {
-                logBody.innerHTML = '<tr><td colspan="13" class="text-center text-danger">Failed to load logs.</td></tr>';
+                logBody.innerHTML = '<tr><td colspan="14" class="text-center text-danger">Failed to load logs.</td></tr>';
                 return;
             }
             // Hide NO_STRIKE_IN_RANGE events from the web UI (still logged in CSV for audit)
             const visible = data.filter(function (r) { return r.event !== 'NO_STRIKE_IN_RANGE'; });
 
             if (visible.length === 0) {
-                logBody.innerHTML = '<tr><td colspan="13" class="text-center text-secondary">No log entries for this filter.</td></tr>';
+                logBody.innerHTML = '<tr><td colspan="14" class="text-center text-secondary">No log entries for this filter.</td></tr>';
+                if (netPnlLabel) netPnlLabel.textContent = '0.00';
                 return;
             }
 
             logBody.innerHTML = '';
+            let netPnlAmount = 0;
             visible.forEach(function (r) {
                 const tr = document.createElement('tr');
                 const eventClass = (r.event || '').indexOf('EXIT') !== -1 ? 'bg-warning text-dark' :
@@ -333,7 +345,16 @@
                     '<td>' + formatTwoDecimals(r.stop_pct) + '</td>' +
                     '<td>' + formatTwoDecimals(r.pnl_abs) + '</td>' +
                     '<td>' + formatTwoDecimals(r.pnl_pct) + '</td>' +
+                    '<td>' + formatTwoDecimals(r.pnl_amount) + '</td>' +
                     '<td class="small text-secondary">' + (r.details || '') + '</td>';
+
+                // Accumulate net PnL amount across all rows
+                if (r.pnl_amount !== '' && r.pnl_amount != null) {
+                    const num = typeof r.pnl_amount === 'string' ? parseFloat(r.pnl_amount) : r.pnl_amount;
+                    if (!Number.isNaN(num)) {
+                        netPnlAmount += num;
+                    }
+                }
 
                 // Only attach popup for rows that actually place orders (ENTRY/EXIT_*)
                 if (r.event === 'ENTRY' || (r.event || '').indexOf('EXIT_') === 0) {
@@ -345,8 +366,13 @@
 
                 logBody.appendChild(tr);
             });
+
+            if (netPnlLabel) {
+                netPnlLabel.textContent = formatTwoDecimals(netPnlAmount || 0);
+            }
         } catch (e) {
-            logBody.innerHTML = '<tr><td colspan="13" class="text-center text-danger">Error loading logs.</td></tr>';
+            logBody.innerHTML = '<tr><td colspan="14" class="text-center text-danger">Error loading logs.</td></tr>';
+            if (netPnlLabel) netPnlLabel.textContent = '0.00';
         }
     }
 
