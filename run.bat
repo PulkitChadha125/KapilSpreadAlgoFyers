@@ -18,7 +18,7 @@ if errorlevel 1 (
 )
 
 echo Starting app and opening browser in 4 seconds...
-start cmd /c "timeout /t 4 /nobreak > nul && start http://127.0.0.1:5000"
+start cmd /c "timeout /t 4 /nobreak > nul && start http://127.0.0.1:3000"
 
 python main.py
 pause

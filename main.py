@@ -223,6 +223,8 @@ ORDER_LOG_COLUMNS = [
     "stop_pct",
     "target_abs",
     "stop_abs",
+    "pnl_abs",
+    "pnl_pct",
     "details",
     "ce_request",
     "ce_response",
@@ -234,7 +236,20 @@ ORDER_LOG_COLUMNS = [
 def load_state():
     try:
         with open(STATE_FILE, "r") as f:
-            return json.load(f)
+            raw = json.load(f)
+            if not isinstance(raw, dict):
+                return {}
+            # Only keep entries that are actually in-position. This ensures
+            # state.json semantically represents *open* positions only.
+            clean = {}
+            for key, rec in raw.items():
+                if isinstance(rec, dict) and rec.get("in_position"):
+                    clean[key] = rec
+            # If we dropped anything (closed positions lingering from older runs),
+            # write back the cleaned state so the file matches the in-memory view.
+            if clean != raw:
+                save_state(clean)
+            return clean
     except FileNotFoundError:
         return {}
     except Exception as e:
@@ -264,6 +279,8 @@ def append_order_log(
     stop_pct: float | None = None,
     target_abs: float | None = None,
     stop_abs: float | None = None,
+    pnl_abs: float | None = None,
+    pnl_pct: float | None = None,
     details: str = "",
     ce_request: dict | None = None,
     ce_response: dict | None = None,
@@ -299,6 +316,8 @@ def append_order_log(
                 "stop_pct": "" if stop_pct is None else stop_pct,
                 "target_abs": "" if target_abs is None else target_abs,
                 "stop_abs": "" if stop_abs is None else stop_abs,
+                "pnl_abs": "" if pnl_abs is None else pnl_abs,
+                "pnl_pct": "" if pnl_pct is None else pnl_pct,
                 "details": details,
                 "ce_request": "" if ce_request is None else json.dumps(ce_request, ensure_ascii=False),
                 "ce_response": "" if ce_response is None else json.dumps(ce_response, ensure_ascii=False),
@@ -599,6 +618,29 @@ def _strategy_loop_worker():
                         price_ce = float(ltp_ce) if ltp_ce is not None else None
                         price_pe = float(ltp_pe) if ltp_pe is not None else None
 
+                        # Compute combined LTP and P&L at stop time (per pair, not multiplied by qty)
+                        exit_combined = None
+                        if price_ce is not None and price_pe is not None:
+                            exit_combined = price_ce + price_pe
+                        elif price_ce is not None:
+                            exit_combined = price_ce
+                        elif price_pe is not None:
+                            exit_combined = price_pe
+
+                        entry_combined = float(srec.get("entry_combined") or 0.0)
+                        pnl_abs = None
+                        pnl_pct = None
+                        if exit_combined is not None and entry_combined:
+                            pnl_abs = exit_combined - entry_combined
+                            pnl_pct = (pnl_abs / entry_combined) * 100.0
+
+                        print(
+                            f"[EXIT_STOPTIME] {unique_key} | "
+                            f"CE={ce_sym} @{price_ce}, PE={pe_sym} @{price_pe}, "
+                            f"entry_combined={entry_combined}, exit_combined={exit_combined}, "
+                            f"pnl_abs={pnl_abs}, pnl_pct={pnl_pct}"
+                        )
+
                         sell_ce = place_order(ce_sym, exit_qty, -1, order_type=1, limit_price=price_ce) if ce_sym else {}
                         sell_pe = place_order(pe_sym, exit_qty, -1, order_type=1, limit_price=price_pe) if pe_sym else {}
                         order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
@@ -609,11 +651,15 @@ def _strategy_loop_worker():
                             symbol=srec.get("symbol", symbol),
                             call_symbol=ce_sym,
                             put_symbol=pe_sym,
-                            combined_price=srec.get("entry_combined"),
+                            price_call=price_ce,
+                            price_put=price_pe,
+                            combined_price=exit_combined,
                             target_pct=srec.get("target_pct"),
                             stop_pct=srec.get("stop_pct"),
                             target_abs=srec.get("target_abs"),
                             stop_abs=srec.get("stop_abs"),
+                            pnl_abs=pnl_abs,
+                            pnl_pct=pnl_pct,
                             details=f"Exiting trade at stop time {current_time}. Placed SELL orders (qty={exit_qty}). {order_detail}",
                             ce_request=sell_ce.get("request"),
                             ce_response=sell_ce.get("response"),
@@ -757,6 +803,9 @@ def _strategy_loop_worker():
                                 pe_response=order_pe.get("response"),
                             )
 
+                            # Treat this as an "entry" on the strategy side even if the broker
+                            # rejects due to margin or lot-size errors. This is useful for
+                            # testing the strategy logic independently of live broker status.
                             # Use a fresh state dict for this position so we never carry over stale
                             # entry_combined/target_abs from a previous cycle.
                             state[unique_key] = {
@@ -773,6 +822,7 @@ def _strategy_loop_worker():
                                 "stop_abs": stop_abs,
                                 "quantity": quantity,
                                 "in_position": True,
+                                "entry_ts": datetime.now().isoformat(),
                             }
                         continue
 
@@ -795,6 +845,8 @@ def _strategy_loop_worker():
                             continue
 
                         combined = price_ce + price_pe
+                        entry_call = srec.get("entry_call")
+                        entry_put = srec.get("entry_put")
                         entry_combined = srec.get("entry_combined", combined)
 
                         # Detect live updates to Target/StopLoss in TradeSettings.csv
@@ -809,6 +861,8 @@ def _strategy_loop_worker():
                         new_stop_pct = 0.0 if math.isnan(stop_pct) else stop_pct
 
                         if (new_target_pct != old_target_pct) or (new_stop_pct != old_stop_pct):
+                            # Always calculate new absolute targets from the ORIGINAL
+                            # entry combined premium, not from the latest market price.
                             new_target_abs = entry_combined * (new_target_pct / 100.0) if new_target_pct > 0 else 0.0
                             new_stop_abs = entry_combined * (new_stop_pct / 100.0) if new_stop_pct > 0 else 0.0
 
@@ -819,9 +873,11 @@ def _strategy_loop_worker():
                                 symbol=symbol,
                                 call_symbol=ce_sym,
                                 put_symbol=pe_sym,
-                                price_call=price_ce,
-                                price_put=price_pe,
-                                combined_price=combined,
+                                # Show the original entry prices in the "modified"
+                                # event so the log is anchored to the entry snapshot.
+                                price_call=entry_call,
+                                price_put=entry_put,
+                                combined_price=entry_combined,
                                 target_pct=new_target_pct,
                                 stop_pct=new_stop_pct,
                                 target_abs=new_target_abs,
@@ -850,6 +906,10 @@ def _strategy_loop_worker():
                             sell_ce = place_order(ce_sym, exit_qty, -1, order_type=1, limit_price=price_ce)
                             sell_pe = place_order(pe_sym, exit_qty, -1, order_type=1, limit_price=price_pe)
                             order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
+
+                            pnl_abs = combined - entry_combined if entry_combined else None
+                            pnl_pct = (pnl_abs / entry_combined) * 100.0 if (pnl_abs is not None and entry_combined) else None
+
                             append_order_log(
                                 event="EXIT_TARGET",
                                 strategy_key=unique_key,
@@ -864,6 +924,8 @@ def _strategy_loop_worker():
                                 stop_pct=srec.get("stop_pct"),
                                 target_abs=target_abs,
                                 stop_abs=stop_abs,
+                                pnl_abs=pnl_abs,
+                                pnl_pct=pnl_pct,
                                 details=f"Exiting trade on target hit. Placed SELL orders (qty={exit_qty}). {order_detail}",
                                 ce_request=sell_ce.get("request"),
                                 ce_response=sell_ce.get("response"),
@@ -883,6 +945,10 @@ def _strategy_loop_worker():
                             sell_ce = place_order(ce_sym, exit_qty, -1, order_type=1, limit_price=price_ce)
                             sell_pe = place_order(pe_sym, exit_qty, -1, order_type=1, limit_price=price_pe)
                             order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
+
+                            pnl_abs = combined - entry_combined if entry_combined else None
+                            pnl_pct = (pnl_abs / entry_combined) * 100.0 if (pnl_abs is not None and entry_combined) else None
+
                             append_order_log(
                                 event="EXIT_STOPLOSS",
                                 strategy_key=unique_key,
@@ -897,6 +963,8 @@ def _strategy_loop_worker():
                                 stop_pct=srec.get("stop_pct"),
                                 target_abs=target_abs,
                                 stop_abs=stop_abs,
+                                pnl_abs=pnl_abs,
+                                pnl_pct=pnl_pct,
                                 details=f"Exiting trade on stop-loss hit. Placed SELL orders (qty={exit_qty}). {order_detail}",
                                 ce_request=sell_ce.get("request"),
                                 ce_response=sell_ce.get("response"),
@@ -1099,6 +1167,21 @@ def exit_all():
         price_ce = float(ltp_ce) if ltp_ce is not None else None
         price_pe = float(ltp_pe) if ltp_pe is not None else None
 
+        exit_combined = None
+        if price_ce is not None and price_pe is not None:
+            exit_combined = price_ce + price_pe
+        elif price_ce is not None:
+            exit_combined = price_ce
+        elif price_pe is not None:
+            exit_combined = price_pe
+
+        entry_combined = float(srec.get("entry_combined") or 0.0)
+        pnl_abs = None
+        pnl_pct = None
+        if exit_combined is not None and entry_combined:
+            pnl_abs = exit_combined - entry_combined
+            pnl_pct = (pnl_abs / entry_combined) * 100.0
+
         sell_ce = place_order(ce_sym, qty, -1, order_type=1, limit_price=price_ce) if ce_sym else {}
         sell_pe = place_order(pe_sym, qty, -1, order_type=1, limit_price=price_pe) if pe_sym else {}
         order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
@@ -1109,9 +1192,13 @@ def exit_all():
             symbol=srec.get("symbol"),
             call_symbol=ce_sym,
             put_symbol=pe_sym,
-            combined_price=srec.get("entry_combined"),
+            price_call=price_ce,
+            price_put=price_pe,
+            combined_price=exit_combined,
             target_pct=srec.get("target_pct"),
             stop_pct=srec.get("stop_pct"),
+            pnl_abs=pnl_abs,
+            pnl_pct=pnl_pct,
             details=f"Exiting trade via Exit button for strike prices {ce_sym}, {pe_sym} at qty={qty}. {order_detail}",
             ce_request=sell_ce.get("request"),
             ce_response=sell_ce.get("response"),

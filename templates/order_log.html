@@ -114,11 +114,13 @@
                             <th>Combined</th>
                             <th>Target %</th>
                             <th>Stop %</th>
+                            <th>PNL (pts)</th>
+                            <th>PNL %</th>
                             <th>Details</th>
                         </tr>
                     </thead>
                     <tbody id="log-body">
-                        <tr><td colspan="11" class="text-center text-secondary">Loading...</td></tr>
+                        <tr><td colspan="13" class="text-center text-secondary">Loading...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -269,6 +271,13 @@
         }
     }
 
+    function formatTwoDecimals(value) {
+        if (value === '' || value === null || value === undefined) return '';
+        const num = typeof value === 'string' ? parseFloat(value) : value;
+        if (Number.isNaN(num)) return '';
+        return num.toFixed(2);
+    }
+
     function showOrderDetails(row) {
         if (!modal) return;
         if (metaEl) {
@@ -289,19 +298,19 @@
     }
 
     async function loadLogs() {
-        logBody.innerHTML = '<tr><td colspan="11" class="text-center text-secondary">Loading...</td></tr>';
+        logBody.innerHTML = '<tr><td colspan="13" class="text-center text-secondary">Loading...</td></tr>';
         try {
             const res = await fetch('/order-log-data?' + getQueryParams());
             const data = await res.json();
             if (!Array.isArray(data)) {
-                logBody.innerHTML = '<tr><td colspan="11" class="text-center text-danger">Failed to load logs.</td></tr>';
+                logBody.innerHTML = '<tr><td colspan="13" class="text-center text-danger">Failed to load logs.</td></tr>';
                 return;
             }
             // Hide NO_STRIKE_IN_RANGE events from the web UI (still logged in CSV for audit)
             const visible = data.filter(function (r) { return r.event !== 'NO_STRIKE_IN_RANGE'; });
 
             if (visible.length === 0) {
-                logBody.innerHTML = '<tr><td colspan="11" class="text-center text-secondary">No log entries for this filter.</td></tr>';
+                logBody.innerHTML = '<tr><td colspan="13" class="text-center text-secondary">No log entries for this filter.</td></tr>';
                 return;
             }
 
@@ -322,6 +331,8 @@
                     '<td>' + (r.combined_price !== '' && r.combined_price != null ? r.combined_price : '') + '</td>' +
                     '<td>' + (r.target_pct !== '' && r.target_pct != null ? r.target_pct : '') + '</td>' +
                     '<td>' + (r.stop_pct !== '' && r.stop_pct != null ? r.stop_pct : '') + '</td>' +
+                    '<td>' + formatTwoDecimals(r.pnl_abs) + '</td>' +
+                    '<td>' + formatTwoDecimals(r.pnl_pct) + '</td>' +
                     '<td class="small text-secondary">' + (r.details || '') + '</td>';
 
                 // Only attach popup for rows that actually place orders (ENTRY/EXIT_*)
@@ -335,7 +346,7 @@
                 logBody.appendChild(tr);
             });
         } catch (e) {
-            logBody.innerHTML = '<tr><td colspan="11" class="text-center text-danger">Error loading logs.</td></tr>';
+            logBody.innerHTML = '<tr><td colspan="13" class="text-center text-danger">Error loading logs.</td></tr>';
         }
     }
 
