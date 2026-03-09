@@ -62,7 +62,8 @@ Project Structure
     - CE/PE option symbols used
     - Entry/exit prices and combined premium
     - Target % / Stop %
-    - PnL (points) and PnL % (both rounded to 2 decimals)
+    - PnL (points), PnL % and PnL Amount (all rounded to 2 decimals, green for profit and red for loss)
+    - Net PnL badge at the top aggregating PnL Amount over all visible rows
     - Details column with raw Fyers API messages
   - Click on any ENTRY / EXIT row to open a modal with the full CE/PE order request/response JSON
 
@@ -85,7 +86,7 @@ Project Structure
     - Timestamp (IST), event type, base symbol, option symbols
     - Entry/exit prices and combined premium
     - Target/stop in % and absolute points
-    - Realised PnL (points and %)
+    - Realised PnL (points, %, and amount per trade)
     - Details string and raw CE/PE request/response payloads (JSON-encoded)
 
 - `TradeSettings.csv`  

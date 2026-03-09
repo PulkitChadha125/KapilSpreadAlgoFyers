@@ -35,6 +35,10 @@
             padding-top: 0.75rem;
             padding-bottom: 0.5rem;
         }
+        .pnl-positive { color: #15803d; font-weight: 600; }
+        .pnl-negative { color: #b91c1c; font-weight: 600; }
+        .badge-pnl-positive { background-color: #bbf7d0; color: #14532d; }
+        .badge-pnl-negative { background-color: #fee2e2; color: #7f1d1d; }
     </style>
 </head>
 <body>
@@ -288,6 +292,15 @@
         return num.toFixed(2);
     }
 
+    function wrapPnl(value) {
+        if (value === '' || value === null || value === undefined) return '';
+        const num = typeof value === 'string' ? parseFloat(value) : value;
+        if (Number.isNaN(num)) return '';
+        const cls = num > 0 ? 'pnl-positive' : (num < 0 ? 'pnl-negative' : '');
+        const txt = num.toFixed(2);
+        return cls ? '<span class="' + cls + '">' + txt + '</span>' : txt;
+    }
+
     function showOrderDetails(row) {
         if (!modal) return;
         if (metaEl) {
@@ -343,9 +356,10 @@
                     '<td>' + formatTwoDecimals(r.combined_price) + '</td>' +
                     '<td>' + formatTwoDecimals(r.target_pct) + '</td>' +
                     '<td>' + formatTwoDecimals(r.stop_pct) + '</td>' +
-                    '<td>' + formatTwoDecimals(r.pnl_abs) + '</td>' +
-                    '<td>' + formatTwoDecimals(r.pnl_pct) + '</td>' +
-                    '<td>' + formatTwoDecimals(r.pnl_amount) + '</td>' +
+                    // PnL points, %, and amount with green/red coloring
+                    '<td>' + wrapPnl(r.pnl_abs) + '</td>' +
+                    '<td>' + wrapPnl(r.pnl_pct) + '</td>' +
+                    '<td>' + wrapPnl(r.pnl_amount) + '</td>' +
                     '<td class="small text-secondary">' + (r.details || '') + '</td>';
 
                 // Accumulate net PnL amount across all rows
@@ -368,7 +382,15 @@
             });
 
             if (netPnlLabel) {
-                netPnlLabel.textContent = formatTwoDecimals(netPnlAmount || 0);
+                const np = netPnlAmount || 0;
+                const txt = formatTwoDecimals(np);
+                netPnlLabel.textContent = txt;
+                netPnlLabel.classList.remove('badge-pnl-positive', 'badge-pnl-negative');
+                if (np > 0) {
+                    netPnlLabel.classList.add('badge-pnl-positive');
+                } else if (np < 0) {
+                    netPnlLabel.classList.add('badge-pnl-negative');
+                }
             }
         } catch (e) {
             logBody.innerHTML = '<tr><td colspan="14" class="text-center text-danger">Error loading logs.</td></tr>';
