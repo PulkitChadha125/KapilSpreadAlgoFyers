@@ -326,11 +326,11 @@
                     '<td>' + (r.base_symbol || '') + '</td>' +
                     '<td><code class="small">' + (r.call_symbol || '') + '</code></td>' +
                     '<td><code class="small">' + (r.put_symbol || '') + '</code></td>' +
-                    '<td>' + (r.price_call !== '' && r.price_call != null ? r.price_call : '') + '</td>' +
-                    '<td>' + (r.price_put !== '' && r.price_put != null ? r.price_put : '') + '</td>' +
-                    '<td>' + (r.combined_price !== '' && r.combined_price != null ? r.combined_price : '') + '</td>' +
-                    '<td>' + (r.target_pct !== '' && r.target_pct != null ? r.target_pct : '') + '</td>' +
-                    '<td>' + (r.stop_pct !== '' && r.stop_pct != null ? r.stop_pct : '') + '</td>' +
+                    '<td>' + formatTwoDecimals(r.price_call) + '</td>' +
+                    '<td>' + formatTwoDecimals(r.price_put) + '</td>' +
+                    '<td>' + formatTwoDecimals(r.combined_price) + '</td>' +
+                    '<td>' + formatTwoDecimals(r.target_pct) + '</td>' +
+                    '<td>' + formatTwoDecimals(r.stop_pct) + '</td>' +
                     '<td>' + formatTwoDecimals(r.pnl_abs) + '</td>' +
                     '<td>' + formatTwoDecimals(r.pnl_pct) + '</td>' +
                     '<td class="small text-secondary">' + (r.details || '') + '</td>';

@@ -1,16 +1,18 @@
 Kapil Spread Algo
 ==================
 
-This project is a Flask-based UI and trading harness for option strategies on the Fyers platform.  
+This project is a Flask-based UI and trading engine for option strategies on the Fyers platform.  
 The web UI lets you configure per-symbol settings in a CSV file and then start a background strategy that:
 
 - Logs into Fyers using credentials from `FyersCredentials.csv`
 - Builds option contracts (CE/PE) around the ATM based on your settings
 - Subscribes those contracts to the Fyers websocket
-- Runs a per-second strategy loop (ready for your trading logic)
-
-> NOTE: The current strategy loop only builds subscriptions and logs ticks.  
-> Actual trade entry/exit logic is intentionally left to be implemented next.
+- Runs a per-second strategy loop that:
+  - Automatically picks CE/PE strikes inside your configured premium band
+  - Places paired CE/PE entry orders
+  - Tracks open positions in `state.json`
+  - Manages target, stop-loss, manual exit and stop-time exits
+  - Logs every decision into `order_log.csv` and the Order Log UI
 
 Project Structure
 -----------------
@@ -18,8 +20,25 @@ Project Structure
 - `main.py`  
   - Flask app & routes  
   - Strategy bootstrap (`/start-strategy`, `/stop-strategy`, `/strategy-status`)  
-  - Reading/writing `TradeSettings.csv` (including `Target` and `StopLoss`)  
-  - Building option symbols and parent list `FyerSymbolList` for websocket
+  - REST API for:
+    - Reading/writing `TradeSettings.csv` (including `Target`, `StopLoss`, Start/Stop time, enable flag)
+    - Toggling trading, deleting/importing/exporting settings
+    - Viewing/clearing the Order Log
+    - Triggering Exit All for open positions
+  - Building option symbols (`build_option_subscriptions`) and global list `FyerSymbolList` for websocket
+  - Main strategy loop (`_strategy_loop_worker`) that:
+    - Reads `TradeSettings.csv` every second
+    - Loads open positions from `state.json`
+    - Enters trades when CE/PE LTPs fall inside the configured premium range
+    - Tracks each position with entry prices, combined premium, target/stop in `state.json`
+    - Recomputes target/stop if you change them in the UI while a trade is open
+    - Exits on:
+      - Target hit (`EXIT_TARGET`)
+      - Stop-loss hit (`EXIT_STOPLOSS`)
+      - Stop time (`EXIT_STOPTIME`)
+      - Manual exit (`MANUAL_EXIT` via the Exit button)
+    - Disables trading for a row after the position is fully closed (sets `TRADINGENABLED=FALSE`)
+    - Writes every event into `order_log.csv` via `append_order_log(...)`
 
 - `FyresIntegration.py`  
   - Fyers login (`automated_login`)  
@@ -29,8 +48,45 @@ Project Structure
 
 - `templates/symbol_settings.html`  
   - Main web UI for viewing/editing symbol settings  
-  - Edit/Add modal, delete button, square-off button, trading toggle, import/export buttons  
+  - Edit/Add modal, delete button, trading toggle, import/export buttons  
   - Strategy Start/Stop buttons and a live **Strategy: Running/Stopped** badge
+
+- `templates/order_log.html`  
+  - Order Log UI (`/order-log`) that reads from `order_log.csv` via `/order-log-data`
+  - Filters by base symbol and time range (All / Today / Custom range)
+  - Shows all strategy events:
+    - `ENTRY`
+    - `TARGET_STOPLOSS_UPDATED` (when you change Target/StopLoss while a trade is open)
+    - `EXIT_TARGET`, `EXIT_STOPLOSS`, `EXIT_STOPTIME`, `MANUAL_EXIT`
+  - Columns:
+    - CE/PE option symbols used
+    - Entry/exit prices and combined premium
+    - Target % / Stop %
+    - PnL (points) and PnL % (both rounded to 2 decimals)
+    - Details column with raw Fyers API messages
+  - Click on any ENTRY / EXIT row to open a modal with the full CE/PE order request/response JSON
+
+- `state.json`  
+  - JSON snapshot of **open positions only**
+  - Keys are `Symbol|ExpType|ExpieryDate` (e.g. `NSE:NIFTY26MARFUT|WEEKLY|10-03-2026`)
+  - Each record stores:
+    - `symbol`, `base_symbol`
+    - `call_symbol`, `put_symbol`
+    - `entry_call`, `entry_put`, `entry_combined`
+    - `target_pct`, `stop_pct`, `target_abs`, `stop_abs`
+    - `quantity`
+    - `in_position` flag
+  - On any full exit (target, stop-loss, stop-time, manual exit) the corresponding key is removed
+  - When you re-enable trading for a symbol, the next entry starts from fresh LTP and writes a new record
+
+- `order_log.csv`  
+  - Tabular log written by `append_order_log(...)`
+  - Columns include:
+    - Timestamp (IST), event type, base symbol, option symbols
+    - Entry/exit prices and combined premium
+    - Target/stop in % and absolute points
+    - Realised PnL (points and %)
+    - Details string and raw CE/PE request/response payloads (JSON-encoded)
 
 - `TradeSettings.csv`  
   - Primary configuration source for symbol settings (see format below)
@@ -134,7 +190,7 @@ Running the App
 Strategy Bootstrap
 ------------------
 
-The strategy is started and stopped from the navbar buttons:
+The strategy is started and stopped from the navbar buttons and runs as two background threads:
 
 - **Start Strategy**
 
@@ -147,17 +203,31 @@ The strategy is started and stopped from the navbar buttons:
        - Fetches LTP
        - Rounds to nearest `StrikeStep` to get ATM
        - Builds strikes from `-StrikeRange` to `+StrikeRange`
-       - Formats monthly option contracts for both CE and PE using:
-         `NSE:{BaseSymbol}{YYMMM}{Strike}{CE/PE}`
-       - Stores them under `option_key_by_symbol[BaseSymbol]`
+       - Formats monthly/weekly option contracts for both CE and PE using:
+         `NSE:{BaseSymbol}{ExpiryCode}{Strike}{CE/PE}`
+       - Stores them under `option_key_by_symbol[unique_key]`
        - Adds them to `FyerSymbolList`
     4. Starts the Fyers websocket via `fyres_websocket(FyerSymbolList)` in a background thread
-    5. Starts `_strategy_loop_worker()` in another background thread
-
-  - The loop currently logs:
-    ```text
-    [STRATEGY TICK] <timestamp> | tracking <N> option symbols.
-    ```
+    5. Starts `_strategy_loop_worker()` in another background thread, which:
+       - Once per second:
+         - Reloads `TradeSettings.csv`
+         - Reloads `state.json` (open positions only)
+         - For each enabled row:
+           - Forces an exit if current time is past StopTime (`EXIT_STOPTIME`)
+           - If not in a position yet:
+             - Scans all subscribed options for that row
+             - Chooses the cheapest CE and PE whose LTP is inside the `[PremiumDown, PremiumUp]` range
+             - Places paired BUY orders and logs an `ENTRY`
+             - Stores the entry snapshot in `state.json`
+           - If already in a position:
+             - Monitors combined CE+PE LTP for target / stop-loss hits
+             - Detects live changes to Target/StopLoss in `TradeSettings.csv` and logs `TARGET_STOPLOSS_UPDATED`
+             - On target/stop/stop-time/manual exit:
+               - Places SELL orders
+               - Computes PnL
+               - Logs the appropriate `EXIT_*` event
+               - Clears that key from `state.json`
+               - Sets `TRADINGENABLED=FALSE` so next enable starts fresh
 
 - **Stop Strategy**
 
@@ -170,20 +240,43 @@ The strategy is started and stopped from the navbar buttons:
     - **Strategy: Running** (green) when `running == true`
     - **Strategy: Stopped** (grey) otherwise
 
-Extending With Trading Logic
-----------------------------
+Strategy Logic Overview
+-----------------------
 
-The next step is to plug actual trading logic into `_strategy_loop_worker()`, using the latest option LTPs from:
+The current code implements a complete CE+PE “spread” strategy loop:
 
-- `FyresIntegration.shared_data` for underlying quotes
-- Option quotes via the subscribed websocket (`FyerSymbolList`)
+- **Entry logic**
+  - For each enabled row in `TradeSettings.csv` and within `[StartTime, StopTime]`:
+    - Use the option list generated by `build_option_subscriptions(...)`
+    - For each option, read latest LTP from `FyresIntegration.shared_data`
+    - Keep the cheapest CE and PE whose LTP lies in `[PremiumDown, PremiumUp]`
+    - When both sides are available:
+      - Compute `entry_combined = entry_call + entry_put`
+      - Compute `target_abs = entry_combined * Target%`
+      - Compute `stop_abs   = entry_combined * StopLoss%`
+      - Place CE/PE BUY orders via `place_order(...)`
+      - Log an `ENTRY` event to `order_log.csv`
+      - Save the full entry snapshot to `state.json`
 
-Recommended approach:
+- **Live target/stop updates**
+  - While a trade is open, any manual edits you make to `Target`/`StopLoss` in the UI:
+    - Are detected on the next tick
+    - Recalculate `target_abs` / `stop_abs` from the original `entry_combined`
+    - Log a `TARGET_STOPLOSS_UPDATED` event (anchored to the entry prices)
 
-1. In each tick, iterate your option lists in `option_key_by_symbol`.
-2. For each option symbol, read its latest LTP from the shared data store.
-3. Evaluate entry/exit conditions based on `Target`, `StopLoss`, time filters (`StartTime`/`StopTime`), etc.
-4. Place/cancel orders via Fyers REST APIs (integrate via `FyresIntegration.py`).
+- **Exit logic**
+  - On each tick, for open positions:
+    - Read current CE/PE LTPs from `shared_data`
+    - Compute `combined = price_ce + price_pe`
+    - If `combined >= entry_combined + target_abs` → `EXIT_TARGET`
+    - Else if `combined <= entry_combined - stop_abs` → `EXIT_STOPLOSS`
+    - Independently, if current time >= `StopTime` → `EXIT_STOPTIME`
+    - Manual “Exit All” from the UI uses the latest LTPs and logs `MANUAL_EXIT`
+  - Every exit:
+    - Places SELL orders with the current LTP as limit
+    - Logs prices, target/stop and realised PnL to `order_log.csv`
+    - Removes the key from `state.json`
+    - Sets `TRADINGENABLED=FALSE` so next enable starts fresh
 
 Security & Safety
 -----------------
