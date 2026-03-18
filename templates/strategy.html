@@ -84,6 +84,9 @@
                                 <th>Entry CE</th>
                                 <th>Entry PE</th>
                                 <th>Combined Entry</th>
+                                <th>Current CE LTP</th>
+                                <th>Current PE LTP</th>
+                                <th>Current Combined LTP</th>
                                 <th>Target %</th>
                                 <th>Stop %</th>
                                 <th>Target Abs</th>
@@ -95,7 +98,7 @@
                             </thead>
                             <tbody id="positions-body">
                             <tr>
-                                <td colspan="13" class="text-center text-secondary">
+                                <td colspan="16" class="text-center text-secondary">
                                     Loading positions...
                                 </td>
                             </tr>
@@ -144,12 +147,12 @@
             const body = document.getElementById('positions-body');
             if (!body) return;
             if (!res.ok) {
-                body.innerHTML = '<tr><td colspan="13" class="text-center text-danger">Failed to load positions.</td></tr>';
+                body.innerHTML = '<tr><td colspan="16" class="text-center text-danger">Failed to load positions.</td></tr>';
                 return;
             }
             const data = await res.json();
             if (!Array.isArray(data) || data.length === 0) {
-                body.innerHTML = '<tr><td colspan="13" class="text-center text-secondary">No open positions from strategy.</td></tr>';
+                body.innerHTML = '<tr><td colspan="16" class="text-center text-secondary">No open positions from strategy.</td></tr>';
                 return;
             }
             body.innerHTML = '';
@@ -162,6 +165,9 @@
                     <td>${fmt2(p.entry_call)}</td>
                     <td>${fmt2(p.entry_put)}</td>
                     <td>${fmt2(p.entry_combined)}</td>
+                    <td>${fmt2(p.ltp_call)}</td>
+                    <td>${fmt2(p.ltp_put)}</td>
+                    <td>${fmt2(p.ltp_combined)}</td>
                     <td>${p.target_pct ?? ''}</td>
                     <td>${p.stop_pct ?? ''}</td>
                     <td>${fmt2(p.target_abs)}</td>

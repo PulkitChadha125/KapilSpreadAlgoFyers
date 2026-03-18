@@ -740,7 +740,8 @@
             })
                 .then((res) => res.json())
                 .then((data) => {
-                    alert(`Strategy started. Subscribed option symbols: ${data.symbols ?? 'unknown'}.`);
+                    const msg = data.message || 'Strategy started.';
+                    alert(`${msg} Subscribed option symbols: ${data.symbols ?? 'unknown'}.`);
                     refreshStrategyStatus();
                 })
                 .catch(() => {
@@ -756,8 +757,9 @@
                 method: 'POST',
             })
                 .then((res) => res.json())
-                .then(() => {
-                    alert('Strategy stopped.');
+                .then((data) => {
+                    const msg = data.message || 'Strategy stopped.';
+                    alert(msg);
                     refreshStrategyStatus();
                 })
                 .catch(() => {

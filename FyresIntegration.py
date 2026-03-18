@@ -57,6 +57,8 @@ access_token=None
 fyers=None
 shared_data = {}
 shared_data_2 = {}
+# Keep a reference to the live data socket so we can close it cleanly
+data_socket = None
 # Lock to ensure thread-safe access to the shared data
 def apiactivation(client_id,redirect_uri,response_type,state,secret_key,grant_type):
     appSession = fyersModel.SessionModel(client_id = client_id, redirect_uri = redirect_uri,
@@ -154,6 +156,105 @@ def get_orderbook():
     res = fyers.orderbook()
     return res
       ## This will provide the user with all the order realted information
+
+
+# Order status codes (Fyers): 1=Cancelled, 2=Traded/Filled, 4=Transit, 5=Rejected, 6=Pending
+ORDER_STATUS_FILLED = 2
+ORDER_STATUS_REJECTED = 5
+ORDER_STATUS_PENDING = 6
+ORDER_STATUS_TRANSIT = 4
+
+
+def get_order_status(order_id):
+    """
+    Fetch orderbook and return status for the given order id.
+    Returns: int status (2=Filled, 5=Rejected, 6=Pending, 4=Transit, etc.) or None if order not found.
+    """
+    global fyers
+    if fyers is None:
+        return None
+    try:
+        res = fyers.orderbook()
+        if not res or not isinstance(res, dict):
+            return None
+        order_list = res.get("orderBook") or res.get("order_book") or []
+        for o in order_list:
+            if not isinstance(o, dict):
+                continue
+            oid = o.get("id") or o.get("order_id")
+            if str(oid) == str(order_id):
+                status = o.get("order_status") or o.get("ord_status") or o.get("status")
+                if status is not None:
+                    return int(status)
+                return None
+        return None
+    except Exception as e:
+        print(f"[FYERS] get_order_status failed for id={order_id}: {e}")
+        return None
+
+
+def get_bid_ask(symbol):
+    """
+    Get current bid and ask for a symbol from quotes.
+    Returns: (bid, ask) as floats; or (None, None) if unavailable. Falls back to LTP for both if bid/ask missing.
+    """
+    global fyers
+    if fyers is None:
+        return None, None
+    try:
+        data = {"symbols": f"{symbol}"}
+        res = fyers.quotes(data)
+        if not res or "d" not in res or not res["d"]:
+            return None, None
+        v = res["d"][0].get("v") or {}
+        bid = v.get("bp") or v.get("bid")
+        ask = v.get("sp") or v.get("ask")
+        ltp = v.get("lp")
+        if bid is not None:
+            bid = float(bid)
+        else:
+            bid = float(ltp) if ltp is not None else None
+        if ask is not None:
+            ask = float(ask)
+        else:
+            ask = float(ltp) if ltp is not None else None
+        return bid, ask
+    except Exception as e:
+        print(f"[FYERS] get_bid_ask failed for {symbol}: {e}")
+        return None, None
+
+
+def modify_order(order_id, limit_price=None, qty=None, stop_price=None, order_type=None):
+    """
+    Modify a pending order. For limit orders pass limit_price and qty.
+    Returns: dict with 's', 'code', 'message', 'id' like place_order response.
+    """
+    global fyers
+    if fyers is None:
+        return {"s": "error", "code": -1, "message": "Fyers not logged in"}
+    try:
+        data = {"id": str(order_id)}
+        if limit_price is not None:
+            data["limitPrice"] = float(limit_price)
+        if qty is not None:
+            data["qty"] = int(qty)
+        if stop_price is not None:
+            data["stopPrice"] = float(stop_price)
+        if order_type is not None:
+            data["type"] = int(order_type)
+        res = fyers.modify_order(data=data)
+        res_dict = res if isinstance(res, dict) else {"raw": str(res)}
+        return {
+            "request": data,
+            "response": res_dict,
+            "message": res_dict.get("message", str(res_dict)),
+            "id": res_dict.get("id"),
+            "code": res_dict.get("code"),
+            "s": res_dict.get("s"),
+        }
+    except Exception as e:
+        print(f"[FYERS] modify_order failed for id={order_id}: {e}")
+        return {"s": "error", "code": -1, "message": str(e), "request": None, "response": None}
 
 
 def place_order(symbol, qty, side, product_type="INTRADAY", order_type=1, limit_price=0):
@@ -459,7 +560,7 @@ def fetchOHLC_get_selected_price(symbol, date):
 
 def fyres_websocket(symbollist):
     from fyers_apiv3.FyersWebsocket import data_ws
-    global access_token
+    global access_token, data_socket
 
     def onmessage(message):
         """
@@ -532,8 +633,26 @@ def fyres_websocket(symbollist):
         on_message=onmessage  # Callback function to handle incoming messages from the WebSocket.
     )
 
+    # Remember this socket globally so main.py can close it later.
+    data_socket = fyers
+
     # Establish a connection to the Fyers WebSocket
     fyers.connect()
+
+
+def close_fyres_websocket():
+    """
+    Close the active Fyers data websocket connection, if any.
+    """
+    global data_socket
+    try:
+        if data_socket is not None:
+            print("[WS] Closing FyersDataSocket connection...")
+            data_socket.close_connection()
+        else:
+            print("[WS] close_fyres_websocket called but no active socket.")
+    except Exception as e:
+        print("[WS] Error while closing FyersDataSocket:", e)
 
 def fyres_quote(symbol):
     data = {

@@ -345,6 +345,97 @@ def load_trade_settings_df():
         return pd.DataFrame()
 
 
+def _check_and_reprice_order(symbol, order_id, qty, side, max_polls=3, poll_interval=1.5):
+    """
+    After placing an order, poll order status. If filled or rejected, do nothing.
+    If status is open (pending/transit), modify the order to latest price:
+    - BUY (side=1): use latest ask.
+    - SELL (side=-1): use latest bid.
+    """
+    from FyresIntegration import (
+        get_order_status,
+        get_bid_ask,
+        modify_order,
+        ORDER_STATUS_FILLED,
+        ORDER_STATUS_REJECTED,
+        ORDER_STATUS_PENDING,
+        ORDER_STATUS_TRANSIT,
+    )
+
+    def _helper_log(message: str) -> None:
+        """Append diagnostic info for order reprice checks to helper_logs.txt."""
+        try:
+            ts = datetime.now().isoformat()
+            with open("helper_logs.txt", "a", encoding="utf-8") as _fh:
+                _fh.write(f"{ts} | {message}\n")
+        except Exception:
+            # Logging must never break trading flow
+            return
+
+    if not order_id:
+        _helper_log(f"_check_and_reprice_order skipped: missing order_id for {symbol}")
+        return
+    # Keep polling until we reach a terminal status (FILLED/REJECTED).
+    # There is deliberately **no max poll limit** here so that an open/
+    # working order is continuously chased with the latest bid/ask until
+    # the broker either fills or rejects it.
+    poll = 0
+    while True:
+        poll += 1
+        time.sleep(poll_interval)
+        status = get_order_status(order_id)
+        if status is None:
+            _helper_log(f"{symbol} order {order_id}: poll {poll} -> status=None")
+            continue
+        if status == ORDER_STATUS_FILLED or status == ORDER_STATUS_REJECTED:
+            _helper_log(f"{symbol} order {order_id}: poll {poll} -> terminal status {status}")
+            return
+        if status in (ORDER_STATUS_PENDING, ORDER_STATUS_TRANSIT):
+            bid, ask = get_bid_ask(symbol)
+            # As requested:
+            #   - BUY (side=1):  use latest ASK price
+            #   - SELL (side=-1): use latest BID price
+            # If preferred side price is missing, fall back to the other side,
+            # and finally to LTP (handled inside get_bid_ask).
+            if side == 1:
+                preferred = ask
+                fallback = bid
+            else:
+                preferred = bid
+                fallback = ask
+            new_price = preferred if preferred is not None else fallback
+            if new_price is None:
+                _helper_log(
+                    f"{symbol} order {order_id}: poll {poll} -> open status {status} "
+                    f"but no bid/ask"
+                )
+                continue
+            new_price_rounded = round(new_price, 2)
+            modify_attempts = 3
+            last_mod_resp = None
+            for attempt in range(1, modify_attempts + 1):
+                # Force order_type=1 (LIMIT) on modification so that Fyers accepts
+                # a non-zero limitPrice; otherwise their API may treat it as a
+                # MARKET order (type=2) and require limitPrice=0, which yields
+                # "limitPrice does not match: 0" errors.
+                mod = modify_order(order_id, limit_price=new_price_rounded, qty=qty, order_type=1)
+                last_mod_resp = mod
+                if mod.get("s") == "ok":
+                    print(f"[ORDER_REPRICE] {symbol} order {order_id} modified to {new_price_rounded} (side={side})")
+                    _helper_log(
+                        f"{symbol} order {order_id}: poll {poll}, attempt {attempt}/{modify_attempts} "
+                        f"-> repriced to {new_price_rounded} using BID (side={side}, status={status})"
+                    )
+                    break
+                else:
+                    _helper_log(
+                        f"{symbol} order {order_id}: poll {poll}, attempt {attempt}/{modify_attempts} "
+                        f"-> modify failed (side={side}, status={status}, response={mod})"
+                    )
+                    # Short pause between modify attempts to avoid spamming the API.
+                    time.sleep(0.5)
+
+
 @app.route("/")
 def symbol_settings():
     """
@@ -509,6 +600,10 @@ def build_option_subscriptions():
 
 
 def _start_websocket_worker():
+    """
+    Start the Fyers data websocket for the current FyerSymbolList.
+    This function is run in a separate daemon thread.
+    """
     global FyerSymbolList
     if not FyerSymbolList:
         print("[STRATEGY] No symbols in FyerSymbolList to subscribe to websocket.")
@@ -647,6 +742,15 @@ def _strategy_loop_worker():
                         sell_ce = place_order(ce_sym, exit_qty, -1, order_type=1, limit_price=price_ce) if ce_sym else {}
                         sell_pe = place_order(pe_sym, exit_qty, -1, order_type=1, limit_price=price_pe) if pe_sym else {}
                         order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
+                        _ce_id = sell_ce.get("id") if isinstance(sell_ce, dict) else None
+                        _pe_id = sell_pe.get("id") if isinstance(sell_pe, dict) else None
+                        def _reprice_stoptime():
+                            if _ce_id and ce_sym:
+                                _check_and_reprice_order(ce_sym, _ce_id, exit_qty, -1)
+                            if _pe_id and pe_sym:
+                                _check_and_reprice_order(pe_sym, _pe_id, exit_qty, -1)
+                        import threading as _th_st
+                        _th_st.Thread(target=_reprice_stoptime, daemon=True).start()
                         pnl_amount = pnl_abs * exit_qty if pnl_abs is not None else None
                         append_order_log(
                             event="EXIT_STOPTIME",
@@ -787,6 +891,16 @@ def _strategy_loop_worker():
                                 order_detail += f" [CE id={order_ce.get('id')}]"
                             if order_pe.get("id"):
                                 order_detail += f" [PE id={order_pe.get('id')}]"
+                            # If order is still open, reprice to latest ask (non-blocking)
+                            import threading
+                            ce_id = order_ce.get("id")
+                            pe_id = order_pe.get("id")
+                            def _reprice_entry():
+                                if ce_id:
+                                    _check_and_reprice_order(best_ce, ce_id, quantity, 1)
+                                if pe_id:
+                                    _check_and_reprice_order(best_pe, pe_id, quantity, 1)
+                            threading.Thread(target=_reprice_entry, daemon=True).start()
 
                             append_order_log(
                                 event="ENTRY",
@@ -912,6 +1026,15 @@ def _strategy_loop_worker():
                             sell_ce = place_order(ce_sym, exit_qty, -1, order_type=1, limit_price=price_ce)
                             sell_pe = place_order(pe_sym, exit_qty, -1, order_type=1, limit_price=price_pe)
                             order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
+                            _tid_ce = sell_ce.get("id") if isinstance(sell_ce, dict) else None
+                            _tid_pe = sell_pe.get("id") if isinstance(sell_pe, dict) else None
+                            def _reprice_target():
+                                if _tid_ce and ce_sym:
+                                    _check_and_reprice_order(ce_sym, _tid_ce, exit_qty, -1)
+                                if _tid_pe and pe_sym:
+                                    _check_and_reprice_order(pe_sym, _tid_pe, exit_qty, -1)
+                            import threading as _t2
+                            _t2.Thread(target=_reprice_target, daemon=True).start()
 
                             pnl_abs = combined - entry_combined if entry_combined else None
                             pnl_pct = (pnl_abs / entry_combined) * 100.0 if (pnl_abs is not None and entry_combined) else None
@@ -953,6 +1076,15 @@ def _strategy_loop_worker():
                             sell_ce = place_order(ce_sym, exit_qty, -1, order_type=1, limit_price=price_ce)
                             sell_pe = place_order(pe_sym, exit_qty, -1, order_type=1, limit_price=price_pe)
                             order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
+                            _tid_ce = sell_ce.get("id") if isinstance(sell_ce, dict) else None
+                            _tid_pe = sell_pe.get("id") if isinstance(sell_pe, dict) else None
+                            def _reprice_sl():
+                                if _tid_ce and ce_sym:
+                                    _check_and_reprice_order(ce_sym, _tid_ce, exit_qty, -1)
+                                if _tid_pe and pe_sym:
+                                    _check_and_reprice_order(pe_sym, _tid_pe, exit_qty, -1)
+                            import threading as _t3
+                            _t3.Thread(target=_reprice_sl, daemon=True).start()
 
                             pnl_abs = combined - entry_combined if entry_combined else None
                             pnl_pct = (pnl_abs / entry_combined) * 100.0 if (pnl_abs is not None and entry_combined) else None
@@ -1037,6 +1169,27 @@ def strategy_positions():
         ltp_ce = shared_data.get(ce_sym) if ce_sym else None
         ltp_pe = shared_data.get(pe_sym) if pe_sym else None
 
+        # Normalize LTPs to floats where possible so they can be shown
+        # directly in the Strategy Positions table.
+        price_ce = None
+        price_pe = None
+        ltp_combined = None
+        try:
+            if ltp_ce is not None:
+                price_ce = float(ltp_ce)
+            if ltp_pe is not None:
+                price_pe = float(ltp_pe)
+            if price_ce is not None and price_pe is not None:
+                ltp_combined = price_ce + price_pe
+            elif price_ce is not None:
+                ltp_combined = price_ce
+            elif price_pe is not None:
+                ltp_combined = price_pe
+        except Exception:
+            price_ce = None
+            price_pe = None
+            ltp_combined = None
+
         realized_pnl = None
         realized_pnl_pct = None
         try:
@@ -1049,13 +1202,11 @@ def strategy_positions():
 
         try:
             if (
-                ltp_ce is not None
-                and ltp_pe is not None
+                price_ce is not None
+                and price_pe is not None
                 and entry_call is not None
                 and entry_put is not None
             ):
-                price_ce = float(ltp_ce)
-                price_pe = float(ltp_pe)
                 e_ce = float(entry_call)
                 e_pe = float(entry_put)
                 # Realized P&L per leg = (current - entry) * quantity
@@ -1081,6 +1232,9 @@ def strategy_positions():
                 "entry_call": rec.get("entry_call"),
                 "entry_put": rec.get("entry_put"),
                 "entry_combined": rec.get("entry_combined"),
+                "ltp_call": price_ce,
+                "ltp_put": price_pe,
+                "ltp_combined": ltp_combined,
                 "target_pct": rec.get("target_pct"),
                 "stop_pct": rec.get("stop_pct"),
                 "target_abs": rec.get("target_abs"),
@@ -1125,6 +1279,7 @@ def start_strategy():
         "redirect_uri": redirect_uri,
     }
 
+    # Fresh login before starting the strategy + websocket.
     automated_login(**_login_creds)
     # Remember today's login date in IST so the 09:00 IST scheduler can compare correctly.
     ist_now = dt.datetime.utcnow() + dt.timedelta(hours=5, minutes=30)
@@ -1138,17 +1293,26 @@ def start_strategy():
     strategy_running = True
     threading.Thread(target=_strategy_loop_worker, daemon=True).start()
 
-    return jsonify({"ok": True, "symbols": len(FyerSymbolList)})
+    return jsonify({"ok": True, "message": "Strategy started and websocket (re)connected)", "symbols": len(FyerSymbolList)})
 
 
 @app.route("/stop-strategy", methods=["POST"])
 def stop_strategy():
     """
-    Stop the strategy loop. (Websocket is not explicitly closed yet.)
+    Stop the strategy loop and close the websocket connection.
     """
     global strategy_running
     strategy_running = False
-    return jsonify({"ok": True})
+
+    # Also close the websocket connection so we don't leave a live stream running.
+    try:
+        from FyresIntegration import close_fyres_websocket
+
+        close_fyres_websocket()
+        return jsonify({"ok": True, "message": "Strategy stopped and websocket close requested"})
+    except Exception as e:
+        print("[STRATEGY] Failed to close websocket on stop:", e)
+        return jsonify({"ok": False, "error": str(e)})
 
 
 @app.route("/exit-all", methods=["POST"])
@@ -1197,6 +1361,15 @@ def exit_all():
         sell_ce = place_order(ce_sym, qty, -1, order_type=1, limit_price=price_ce) if ce_sym else {}
         sell_pe = place_order(pe_sym, qty, -1, order_type=1, limit_price=price_pe) if pe_sym else {}
         order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
+        _m_ce_id = sell_ce.get("id") if isinstance(sell_ce, dict) else None
+        _m_pe_id = sell_pe.get("id") if isinstance(sell_pe, dict) else None
+        def _reprice_manual():
+            if _m_ce_id and ce_sym:
+                _check_and_reprice_order(ce_sym, _m_ce_id, qty, -1)
+            if _m_pe_id and pe_sym:
+                _check_and_reprice_order(pe_sym, _m_pe_id, qty, -1)
+        import threading as _t4
+        _t4.Thread(target=_reprice_manual, daemon=True).start()
         append_order_log(
             event="MANUAL_EXIT",
             strategy_key=key,
@@ -1572,11 +1745,17 @@ def save_setting():
         print("[UI] Failed to write TradeSettings.csv in save_setting:", e)
         return jsonify({"error": "failed to write TradeSettings.csv"}), 500
 
-    # When enabling trading for this row, clear its state so next entry uses fresh LTP/target/stop.
+    # When enabling trading for this row, we *normally* want to clear stale state so the next
+    # entry uses fresh LTP/target/stop. However, if there is already a live in_position
+    # record for this key (i.e. an open position), we must NOT clear it, otherwise the
+    # Strategy Positions view will "lose" the running trade when the user edits Target/SL.
     if trading_enabled == "TRUE":
+        key = f"{symbol}|{exp_type}|{ex_date_out}"
         state = load_state()
-        _clear_state_for_key(state, f"{symbol}|{exp_type}|{ex_date_out}")
-        save_state(state)
+        rec = state.get(key)
+        if not (isinstance(rec, dict) and rec.get("in_position")):
+            _clear_state_for_key(state, key)
+            save_state(state)
 
     return jsonify({"ok": True})
 
