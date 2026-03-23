@@ -339,13 +339,53 @@ def load_trade_settings_df():
     try:
         df = pd.read_csv("TradeSettings.csv")
         df.columns = df.columns.str.strip()
-        return df
+        return _dedupe_trade_settings_by_symbol(df, persist=True)
     except Exception as e:
         print("Error loading TradeSettings.csv for UI:", e)
         return pd.DataFrame()
 
 
-def _check_and_reprice_order(symbol, order_id, qty, side, max_polls=3, poll_interval=1.5):
+def _safe_int_from_csv(value, default):
+    """
+    Robust int parser for CSV values that may be '10', '10.0', 10, or NaN.
+    """
+    try:
+        if value is None:
+            return default
+        if pd.isna(value):
+            return default
+        sval = str(value).strip()
+        if sval == "":
+            return default
+        return int(float(sval))
+    except Exception:
+        return default
+
+
+def _dedupe_trade_settings_by_symbol(df: pd.DataFrame, persist: bool = False) -> pd.DataFrame:
+    """
+    Enforce one row per Symbol (case-insensitive, trimmed).
+    Keeps the latest occurrence in the file and optionally writes cleaned CSV.
+    """
+    try:
+        if df is None or df.empty or "Symbol" not in df.columns:
+            return df
+        _df = df.copy()
+        _df["__symbol_norm__"] = _df["Symbol"].astype(str).str.strip().str.upper()
+        before = len(_df)
+        _df = _df.drop_duplicates(subset=["__symbol_norm__"], keep="last").copy()
+        _df.drop(columns=["__symbol_norm__"], inplace=True, errors="ignore")
+        after = len(_df)
+        if persist and after != before:
+            _df.to_csv("TradeSettings.csv", index=False)
+            print(f"[SETTINGS] Removed duplicate symbol rows: {before - after}")
+        return _df
+    except Exception as e:
+        print("[SETTINGS] Failed to dedupe TradeSettings by symbol:", e)
+        return df
+
+
+def _check_and_reprice_order(symbol, order_id, qty, side, max_polls=3, poll_interval=1):
     """
     After placing an order, poll order status. If filled or rejected, do nothing.
     If status is open (pending/transit), modify the order to latest price:
@@ -481,6 +521,7 @@ def build_option_subscriptions():
     try:
         df = pd.read_csv("TradeSettings.csv")
         df.columns = df.columns.str.strip()
+        df = _dedupe_trade_settings_by_symbol(df, persist=True)
     except Exception as e:
         print("[STRATEGY] Failed to read TradeSettings.csv in build_option_subscriptions:", e)
         return
@@ -510,16 +551,10 @@ def build_option_subscriptions():
                 continue
 
             strike_step_raw = row.get("StrikeStep", 50)
-            try:
-                strike_step = int(str(strike_step_raw).strip())
-            except Exception:
-                strike_step = 50
+            strike_step = _safe_int_from_csv(strike_step_raw, 50)
 
             strike_range_raw = row.get("StrikeRange", 0)
-            try:
-                strike_range = int(str(strike_range_raw).strip())
-            except Exception:
-                strike_range = 0
+            strike_range = _safe_int_from_csv(strike_range_raw, 0)
 
             if strike_range <= 0 or strike_step <= 0:
                 print(f"[STRATEGY] Skipping {symbol}: invalid StrikeRange/StrikeStep ({strike_range}, {strike_step})")
@@ -1659,6 +1694,8 @@ def save_setting():
 
     # Work with object dtype to avoid strict numeric casting issues when updating
     df = df.astype(object)
+    # Keep settings unique by Symbol to avoid weekly/monthly duplicates for same instrument.
+    df = _dedupe_trade_settings_by_symbol(df, persist=False)
 
     # Normalize / convert fields
     base_symbol = str(payload.get("BaseSymbol", "")).strip()
@@ -1695,7 +1732,7 @@ def save_setting():
     original_symbol = str(payload.get("OriginalSymbol", "")).strip()
     key_symbol = original_symbol or symbol
 
-    # Use ORIGINAL ExpType to find the row when user edits expiry type/date (avoids duplicates)
+    # Use original symbol if provided so edits map to the existing row.
     original_exp_type_raw = str(payload.get("OriginalExpType", "")).strip().upper()
     original_exp_type = original_exp_type_raw if original_exp_type_raw in ("MONTHLY", "WEEKLY") else None
 
@@ -1705,13 +1742,9 @@ def save_setting():
     trading_enabled = str(payload.get("TRADINGENABLED", "TRUE")).strip().upper()
     trading_enabled = "TRUE" if trading_enabled == "TRUE" else "FALSE"
 
-    # Find row by ORIGINAL (Symbol, ExpType, ExpieryDate) so editing expiry/type updates in place
-    key_exp_type = original_exp_type if original_exp_type else exp_type
-    key_mask = (
-        (df["Symbol"].astype(str).str.strip() == key_symbol)
-        & (df["ExpType"].astype(str).str.strip().str.upper() == key_exp_type)
-        & (df["ExpieryDate"].astype(str).str.strip() == original_ex_date)
-    )
+    # Enforce exactly one row per symbol: update by symbol (ignoring ExpType/Expiry)
+    # so switching weekly<->monthly does not create a second row.
+    key_mask = df["Symbol"].astype(str).str.strip().str.upper() == key_symbol.strip().upper()
 
     new_row = {
         "Symbol": symbol,
@@ -1734,12 +1767,15 @@ def save_setting():
         # Update existing row(s) column by column to avoid dtype issues
         for col, val in new_row.items():
             df.loc[key_mask, col] = val
+        # If there were accidental duplicates for the symbol, keep only the latest updated row.
+        df = _dedupe_trade_settings_by_symbol(df, persist=False)
         print(f"[UI] Updated existing setting for {symbol}, {exp_type}, {ex_date_out}")
     else:
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
         print(f"[UI] Added new setting for {symbol}, {exp_type}, {ex_date_out}")
 
     try:
+        df = _dedupe_trade_settings_by_symbol(df, persist=False)
         df.to_csv("TradeSettings.csv", index=False)
     except Exception as e:
         print("[UI] Failed to write TradeSettings.csv in save_setting:", e)
