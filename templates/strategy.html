@@ -33,6 +33,17 @@
         .text-secondary {
             color: #6b7280 !important;
         }
+        .trade-badge {
+            font-size: 0.72rem;
+        }
+        .trade-lime {
+            background-color: #bbf7d0;
+            color: #14532d;
+        }
+        .trade-red {
+            background-color: #fecaca;
+            color: #7f1d1d;
+        }
     </style>
 </head>
 <body>
@@ -79,6 +90,8 @@
                             <thead class="table-light">
                             <tr>
                                 <th>Base Symbol</th>
+                                <th>Trade Type</th>
+                                <th>Exit Action</th>
                                 <th>Entry Symbol (CE)</th>
                                 <th>Entry Symbol (PE)</th>
                                 <th>Entry CE</th>
@@ -98,7 +111,7 @@
                             </thead>
                             <tbody id="positions-body">
                             <tr>
-                                <td colspan="16" class="text-center text-secondary">
+                                <td colspan="18" class="text-center text-secondary">
                                     Loading positions...
                                 </td>
                             </tr>
@@ -147,19 +160,26 @@
             const body = document.getElementById('positions-body');
             if (!body) return;
             if (!res.ok) {
-                body.innerHTML = '<tr><td colspan="16" class="text-center text-danger">Failed to load positions.</td></tr>';
+                body.innerHTML = '<tr><td colspan="18" class="text-center text-danger">Failed to load positions.</td></tr>';
                 return;
             }
             const data = await res.json();
             if (!Array.isArray(data) || data.length === 0) {
-                body.innerHTML = '<tr><td colspan="16" class="text-center text-secondary">No open positions from strategy.</td></tr>';
+                body.innerHTML = '<tr><td colspan="18" class="text-center text-secondary">No open positions from strategy.</td></tr>';
                 return;
             }
             body.innerHTML = '';
             for (const p of data) {
                 const tr = document.createElement('tr');
+                const tt = (p.trade_type || 'BUY').toString().toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+                const entryLabel = tt === 'SELL' ? 'SHORT' : 'BUY';
+                const exitLabel = tt === 'SELL' ? 'COVER' : 'SELL';
+                const entryClass = tt === 'SELL' ? 'trade-red' : 'trade-lime';
+                const exitClass = tt === 'SELL' ? 'trade-lime' : 'trade-red';
                 tr.innerHTML = `
                     <td>${p.base_symbol || ''}</td>
+                    <td><span class="badge trade-badge ${entryClass}">${entryLabel}</span></td>
+                    <td><span class="badge trade-badge ${exitClass}">${exitLabel}</span></td>
                     <td><code>${p.call_symbol || ''}</code></td>
                     <td><code>${p.put_symbol || ''}</code></td>
                     <td>${fmt2(p.entry_call)}</td>
@@ -181,7 +201,7 @@
                     <td>
                         <button type="button" class="btn btn-sm btn-outline-danger"
                                 onclick="exitPosition('${p.base_symbol || ''}')">
-                            Exit
+                            ${exitLabel}
                         </button>
                     </td>
                 `;

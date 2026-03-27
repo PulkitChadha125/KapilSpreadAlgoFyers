@@ -26,6 +26,9 @@
         .table-responsive { font-size: 0.85rem; max-height: calc(100vh - 210px); overflow-y: auto; }
         .table thead th { white-space: nowrap; position: sticky; top: 0; background-color: #f9fafb; z-index: 1; }
         .event-badge { font-size: 0.75rem; }
+        .trade-action-badge { font-size: 0.72rem; }
+        .trade-action-lime { background-color: #bbf7d0; color: #14532d; }
+        .trade-action-red { background-color: #fecaca; color: #7f1d1d; }
         .filter-row {
             margin-bottom: 0.25rem;
             padding-top: 0.5rem !important;
@@ -118,6 +121,7 @@
                         <tr>
                             <th>Timestamp</th>
                             <th>Event</th>
+                            <th>Trade Type</th>
                             <th>Base Symbol</th>
                             <th>Call (CE)</th>
                             <th>Put (PE)</th>
@@ -133,7 +137,7 @@
                         </tr>
                     </thead>
                     <tbody id="log-body">
-                        <tr><td colspan="14" class="text-center text-secondary">Loading...</td></tr>
+                        <tr><td colspan="15" class="text-center text-secondary">Loading...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -320,20 +324,40 @@
         modal.show();
     }
 
+    function deriveTradeAction(row) {
+        const event = (row.event || '').toUpperCase();
+        const ttype = (row.trade_type || '').toUpperCase();
+        const isExit = event === 'MANUAL_EXIT' || event.startsWith('EXIT_');
+        const isEntry = event === 'ENTRY';
+        if (!(isEntry || isExit)) {
+            return { text: '', cls: '' };
+        }
+        if (ttype === 'SELL') {
+            // Sell strategy: entry is SHORT, exit is COVER
+            return isEntry
+                ? { text: 'SHORT', cls: 'trade-action-red' }
+                : { text: 'COVER', cls: 'trade-action-lime' };
+        }
+        // Buy strategy/default: entry is BUY, exit is SELL
+        return isEntry
+            ? { text: 'BUY', cls: 'trade-action-lime' }
+            : { text: 'SELL', cls: 'trade-action-red' };
+    }
+
     async function loadLogs() {
-        logBody.innerHTML = '<tr><td colspan="14" class="text-center text-secondary">Loading...</td></tr>';
+        logBody.innerHTML = '<tr><td colspan="15" class="text-center text-secondary">Loading...</td></tr>';
         try {
             const res = await fetch('/order-log-data?' + getQueryParams());
             const data = await res.json();
             if (!Array.isArray(data)) {
-                logBody.innerHTML = '<tr><td colspan="14" class="text-center text-danger">Failed to load logs.</td></tr>';
+                logBody.innerHTML = '<tr><td colspan="15" class="text-center text-danger">Failed to load logs.</td></tr>';
                 return;
             }
             // Hide NO_STRIKE_IN_RANGE events from the web UI (still logged in CSV for audit)
             const visible = data.filter(function (r) { return r.event !== 'NO_STRIKE_IN_RANGE'; });
 
             if (visible.length === 0) {
-                logBody.innerHTML = '<tr><td colspan="14" class="text-center text-secondary">No log entries for this filter.</td></tr>';
+                logBody.innerHTML = '<tr><td colspan="15" class="text-center text-secondary">No log entries for this filter.</td></tr>';
                 if (netPnlLabel) netPnlLabel.textContent = '0.00';
                 return;
             }
@@ -345,9 +369,14 @@
                 const eventClass = (r.event || '').indexOf('EXIT') !== -1 ? 'bg-warning text-dark' :
                     (r.event === 'ENTRY') ? 'bg-success' : (r.event === 'TARGET_STOPLOSS_UPDATED') ? 'bg-info text-dark' :
                     (r.event === 'NO_STRIKE_IN_RANGE') ? 'bg-secondary text-white' : 'bg-secondary';
+                const action = deriveTradeAction(r);
+                const actionBadge = action.text
+                    ? '<span class="badge trade-action-badge ' + action.cls + '">' + action.text + '</span>'
+                    : '';
                 tr.innerHTML =
                     '<td>' + (r.timestamp || '') + '</td>' +
                     '<td><span class="badge ' + eventClass + ' event-badge">' + (r.event || '') + '</span></td>' +
+                    '<td>' + actionBadge + '</td>' +
                     '<td>' + (r.base_symbol || '') + '</td>' +
                     '<td><code class="small">' + (r.call_symbol || '') + '</code></td>' +
                     '<td><code class="small">' + (r.put_symbol || '') + '</code></td>' +
@@ -393,7 +422,7 @@
                 }
             }
         } catch (e) {
-            logBody.innerHTML = '<tr><td colspan="14" class="text-center text-danger">Error loading logs.</td></tr>';
+            logBody.innerHTML = '<tr><td colspan="15" class="text-center text-danger">Error loading logs.</td></tr>';
             if (netPnlLabel) netPnlLabel.textContent = '0.00';
         }
     }

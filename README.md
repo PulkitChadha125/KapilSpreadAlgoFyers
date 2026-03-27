@@ -1,296 +1,210 @@
-Kapil Spread Algo
-==================
+# Kapil Spread Algo
 
-This project is a Flask-based UI and trading engine for option strategies on the Fyers platform.  
-The web UI lets you configure per-symbol settings in a CSV file and then start a background strategy that:
+Flask-based options strategy engine + web UI for Fyers.
 
-- Logs into Fyers using credentials from `FyersCredentials.csv`
-- Builds option contracts (CE/PE) around the ATM based on your settings
-- Subscribes those contracts to the Fyers websocket
-- Runs a per-second strategy loop that:
-  - Automatically picks CE/PE strikes inside your configured premium band
-  - Places paired CE/PE entry orders
-  - Tracks open positions in `state.json`
-  - Manages target, stop-loss, manual exit and stop-time exits
-  - Logs every decision into `order_log.csv` and the Order Log UI
+This app:
+- Logs in to Fyers
+- Builds option chains around ATM for configured symbols
+- Subscribes those symbols on websocket
+- Runs a 1-second strategy loop for entry/exit management
+- Logs events into `order_log.csv`
+- Tracks open positions in `state.json`
 
-Project Structure
------------------
+---
 
-- `main.py`  
-  - Flask app & routes  
-  - Strategy bootstrap (`/start-strategy`, `/stop-strategy`, `/strategy-status`)  
-  - REST API for:
-    - Reading/writing `TradeSettings.csv` (including `Target`, `StopLoss`, Start/Stop time, enable flag)
-    - Toggling trading, deleting/importing/exporting settings
-    - Viewing/clearing the Order Log
-    - Triggering Exit All for open positions
-  - Building option symbols (`build_option_subscriptions`) and global list `FyerSymbolList` for websocket
-  - Main strategy loop (`_strategy_loop_worker`) that:
-    - Reads `TradeSettings.csv` every second
-    - Loads open positions from `state.json`
-    - Enters trades when CE/PE LTPs fall inside the configured premium range
-    - Tracks each position with entry prices, combined premium, target/stop in `state.json`
-    - Recomputes target/stop if you change them in the UI while a trade is open
-    - Exits on:
-      - Target hit (`EXIT_TARGET`)
-      - Stop-loss hit (`EXIT_STOPLOSS`)
-      - Stop time (`EXIT_STOPTIME`)
-      - Manual exit (`MANUAL_EXIT` via the Exit button)
-    - Disables trading for a row after the position is fully closed (sets `TRADINGENABLED=FALSE`)
-    - Writes every event into `order_log.csv` via `append_order_log(...)`
+## 1) Prerequisites
 
-- `FyresIntegration.py`  
-  - Fyers login (`automated_login`)  
-  - `get_ltp` helper  
-  - Websocket subscription helpers (`fyres_websocket`, etc.)  
-  - Shared dicts (`shared_data`, `shared_data_2`) where latest LTPs are stored
+- Python 3.9+
+- Valid Fyers account + API app
+- Internet access for Fyers login/websocket
 
-- `templates/symbol_settings.html`  
-  - Main web UI for viewing/editing symbol settings  
-  - Edit/Add modal, delete button, trading toggle, import/export buttons  
-  - Strategy Start/Stop buttons and a live **Strategy: Running/Stopped** badge
+Recommended:
+- Virtual environment (`.venv`)
 
-- `templates/order_log.html`  
-  - Order Log UI (`/order-log`) that reads from `order_log.csv` via `/order-log-data`
-  - Filters by base symbol and time range (All / Today / Custom range)
-  - Shows all strategy events:
-    - `ENTRY`
-    - `TARGET_STOPLOSS_UPDATED` (when you change Target/StopLoss while a trade is open)
-    - `EXIT_TARGET`, `EXIT_STOPLOSS`, `EXIT_STOPTIME`, `MANUAL_EXIT`
-  - Columns:
-    - CE/PE option symbols used
-    - Entry/exit prices and combined premium
-    - Target % / Stop %
-    - PnL (points), PnL % and PnL Amount (all rounded to 2 decimals, green for profit and red for loss)
-    - Net PnL badge at the top aggregating PnL Amount over all visible rows
-    - Details column with raw Fyers API messages
-  - Click on any ENTRY / EXIT row to open a modal with the full CE/PE order request/response JSON
+---
 
-- `state.json`  
-  - JSON snapshot of **open positions only**
-  - Keys are `Symbol|ExpType|ExpieryDate` (e.g. `NSE:NIFTY26MARFUT|WEEKLY|10-03-2026`)
-  - Each record stores:
-    - `symbol`, `base_symbol`
-    - `call_symbol`, `put_symbol`
-    - `entry_call`, `entry_put`, `entry_combined`
-    - `target_pct`, `stop_pct`, `target_abs`, `stop_abs`
-    - `quantity`
-    - `in_position` flag
-  - On any full exit (target, stop-loss, stop-time, manual exit) the corresponding key is removed
-  - When you re-enable trading for a symbol, the next entry starts from fresh LTP and writes a new record
+## 2) Setup
 
-- `order_log.csv`  
-  - Tabular log written by `append_order_log(...)`
-  - Columns include:
-    - Timestamp (IST), event type, base symbol, option symbols
-    - Entry/exit prices and combined premium
-    - Target/stop in % and absolute points
-    - Realised PnL (points, %, and amount per trade)
-    - Details string and raw CE/PE request/response payloads (JSON-encoded)
+### Option A: Quick start (recommended on Windows)
 
-- `TradeSettings.csv`  
-  - Primary configuration source for symbol settings (see format below)
+Run:
 
-- `requirements.txt`  
-  - Python dependencies for the project
+```bat
+run.bat
+```
 
-Prerequisites
--------------
+`run.bat` will:
+- install dependencies from `requirements.txt`
+- start Flask app on port `3000`
+- open browser at `http://127.0.0.1:3000`
 
-- Python 3.9+ (recommended)
-- A Fyers API app and valid credentials
-- A virtual environment (recommended)
+### Option B: Manual start
 
-Setup
------
+```powershell
+cd "D:\Desktop\python projects\Kapil Spread Algo"
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python main.py
+```
 
-1. **Create and activate virtual environment (PowerShell example):**
+Open:
 
-   ```powershell
-   cd "D:\Desktop\python projects\Kapil Spread Algo"
-   python -m venv .venv
-   .venv\Scripts\activate
-   ```
+`http://127.0.0.1:3000`
 
-2. **Install dependencies:**
+---
 
-   ```powershell
-   pip install -r requirements.txt
-   ```
+## 3) Required Files
 
-3. **Configure Fyers credentials**
+### `FyersCredentials.csv`
 
-   Create `FyersCredentials.csv` in the project root (if not already present) with at least:
+Create in project root with:
 
-   ```text
-   Title,Value
-   client_id,YOUR_APP_ID-100
-   secret_key,YOUR_SECRET
-   redirect_uri,https://your-redirect-url
-   totpkey,BASE32_TOTP_KEY
-   FY_ID,YOUR_FYERS_ID
-   PIN,YOUR_PIN
-   grant_type,authorization_code
-   response_type,code
-   state,None
-   ```
+```text
+Title,Value
+client_id,YOUR_APP_ID-100
+secret_key,YOUR_SECRET
+redirect_uri,https://your-redirect-url
+totpkey,BASE32_TOTP_KEY
+FY_ID,YOUR_FYERS_ID
+PIN,YOUR_PIN
+grant_type,authorization_code
+response_type,code
+state,None
+```
 
-   These are read by `get_api_credentials_Fyers()` in `main.py`.
+### `TradeSettings.csv`
 
-4. **Configure Trade Settings**
+Required columns:
 
-   `TradeSettings.csv` must have the following columns:
+```text
+Symbol,BaseSymbol,Quantity,StrikeRange,StrikeStep,PremiumUp,PremiumDown,Target,StopLoss,ExpieryDate,ExpType,StartTime,StopTime,TRADINGENABLED
+```
 
-   ```text
-   Symbol,BaseSymbol,Quantity,StrikeRange,StrikeStep,PremiumUp,PremiumDown,Target,StopLoss,ExpieryDate,ExpType,StartTime,StopTime,TRADINGENABLED
-   ```
+Example:
 
-   Example:
+```text
+Symbol,BaseSymbol,Quantity,StrikeRange,StrikeStep,PremiumUp,PremiumDown,Target,StopLoss,ExpieryDate,ExpType,StartTime,StopTime,TRADINGENABLED
+NSE:NIFTY26MARFUT,NIFTY,65,10,50,210,200,3,,24-03-2026,WEEKLY,09:15,15:15,TRUE
+```
 
-   ```text
-   Symbol,BaseSymbol,Quantity,StrikeRange,StrikeStep,PremiumUp,PremiumDown,Target,StopLoss,ExpieryDate,ExpType,StartTime,StopTime,TRADINGENABLED
-   NSE:NIFTY26MARFUT,NIFTY,1,10,50,140,130,10,10,29-05-2025,MONTHLY,09:15,15:30,TRUE
-   NSE:BANKNIFTY26MARFUT,BANKNIFTY,65,10,100,140,100,0,0,26-03-2026,MONTHLY,09:15,15:15,TRUE
-   ```
+Field notes:
+- `Symbol`: full underlying (example `NSE:NIFTY26MARFUT`)
+- `BaseSymbol`: option base name (example `NIFTY`)
+- `StrikeRange`: strikes up/down from ATM
+- `StrikeStep`: strike increment (NIFTY typically 50)
+- `ExpType`: `WEEKLY` or `MONTHLY`
+- `ExpieryDate`: `DD-MM-YYYY`
+- `TRADINGENABLED`: `TRUE` or `FALSE`
 
-   - `Symbol`: full Fyers underlying (used for LTP/login checks), e.g. `NSE:NIFTY26MARFUT`
-   - `BaseSymbol`: option base (used to format contracts), e.g. `NIFTY`
-   - `StrikeRange`: number of steps up/down from ATM (e.g. 10 → 10 up + 10 down)
-   - `StrikeStep`: step size in points (e.g. 50)
-   - `ExpType`: currently `MONTHLY` is implemented for options
-   - `TRADINGENABLED`: `TRUE` or `FALSE`
+---
 
-Running the App
----------------
+## 4) Important Current Rules
 
-1. **Start the Flask server:**
+### Single row per symbol
 
-   ```powershell
-   .venv\Scripts\activate
-   python main.py
-   ```
+The app now enforces **one setting row per symbol**.
 
-2. **Open the UI:**
+That means:
+- `NSE:NIFTY26MARFUT` cannot exist as both weekly and monthly in two rows at the same time.
+- Saving the same symbol again updates the existing row.
+- Duplicate symbol rows are auto-cleaned by the backend.
 
-   - Visit `http://127.0.0.1:5000/` in your browser.
+### Strike parsing fix
 
-3. **Symbol Settings UI**
+`StrikeRange` and `StrikeStep` now parse robustly from values like:
+- `10`
+- `10.0`
+- numeric CSV values
 
-   - View all rows from `TradeSettings.csv`.
-   - Use the **Edit** button (pencil) to adjust:
-     - `Symbol`, `Base Symbol`, `Quantity`, `StrikeRange`, `StrikeStep`
-     - `PremiumUp`, `PremiumDown`, `Target`, `StopLoss`
-     - `ExpType` (MONTHLY/WEEKLY), `ExpieryDate` (date picker), `StartTime`, `StopTime`
-     - `TRADINGENABLED`
-   - Use the **trash icon** to delete a setting (row removed from CSV, does **not** square off positions).
-   - Use the **yellow exit icon** to **Square Off Positions** for that setting (currently a stub, logs to console).
-   - Use **Add New Setting** to insert a new row into `TradeSettings.csv`.
-   - Use **Import Settings**/**Export Settings** to manage the CSV via the UI.
+This prevents false logs like:
+- `invalid StrikeRange/StrikeStep (0, 50)`
 
-Strategy Bootstrap
-------------------
+and ensures websocket subscriptions are generated when data is valid.
 
-The strategy is started and stopped from the navbar buttons and runs as two background threads:
+---
 
-- **Start Strategy**
+## 5) Strategy Flow
 
-  - Route: `POST /start-strategy`
-  - Steps:
-    1. Logs into Fyers using `FyersCredentials.csv`
-    2. Reads `TradeSettings.csv`
-    3. For each row with `TRADINGENABLED == TRUE`:
-       - Normalizes the underlying symbol for LTP
-       - Fetches LTP
-       - Rounds to nearest `StrikeStep` to get ATM
-       - Builds strikes from `-StrikeRange` to `+StrikeRange`
-       - Formats monthly/weekly option contracts for both CE and PE using:
-         `NSE:{BaseSymbol}{ExpiryCode}{Strike}{CE/PE}`
-       - Stores them under `option_key_by_symbol[unique_key]`
-       - Adds them to `FyerSymbolList`
-    4. Starts the Fyers websocket via `fyres_websocket(FyerSymbolList)` in a background thread
-    5. Starts `_strategy_loop_worker()` in another background thread, which:
-       - Once per second:
-         - Reloads `TradeSettings.csv`
-         - Reloads `state.json` (open positions only)
-         - For each enabled row:
-           - Forces an exit if current time is past StopTime (`EXIT_STOPTIME`)
-           - If not in a position yet:
-             - Scans all subscribed options for that row
-             - Chooses the cheapest CE and PE whose LTP is inside the `[PremiumDown, PremiumUp]` range
-             - Places paired BUY orders and logs an `ENTRY`
-             - Stores the entry snapshot in `state.json`
-           - If already in a position:
-             - Monitors combined CE+PE LTP for target / stop-loss hits
-             - Detects live changes to Target/StopLoss in `TradeSettings.csv` and logs `TARGET_STOPLOSS_UPDATED`
-             - On target/stop/stop-time/manual exit:
-               - Places SELL orders
-               - Computes PnL
-               - Logs the appropriate `EXIT_*` event
-               - Clears that key from `state.json`
-               - Sets `TRADINGENABLED=FALSE` so next enable starts fresh
+When you click **Start Strategy**:
 
-- **Stop Strategy**
+1. Fyers login is performed
+2. Option symbols are generated from `TradeSettings.csv`
+3. Websocket subscribes to generated option list
+4. Background strategy loop starts (tick every ~1 second)
 
-  - Route: `POST /stop-strategy`
-  - Sets a global flag `strategy_running = False` to stop the tick loop.
+Entry logic (per enabled row):
+- Scans live option LTPs
+- Picks CE and PE within premium range (`PremiumDown` to `PremiumUp`)
+- Places entry orders
 
-- **Status Indicator**
+Exit logic:
+- Target hit -> `EXIT_TARGET`
+- Stop-loss hit -> `EXIT_STOPLOSS`
+- Stop time hit -> `EXIT_STOPTIME`
+- Manual exit -> `MANUAL_EXIT`
 
-  - The UI calls `GET /strategy-status` and shows a badge:
-    - **Strategy: Running** (green) when `running == true`
-    - **Strategy: Stopped** (grey) otherwise
+All events are written to `order_log.csv`.
 
-Strategy Logic Overview
------------------------
+---
 
-The current code implements a complete CE+PE “spread” strategy loop:
+## 6) Order Repricing Behavior
 
-- **Entry logic**
-  - For each enabled row in `TradeSettings.csv` and within `[StartTime, StopTime]`:
-    - Use the option list generated by `build_option_subscriptions(...)`
-    - For each option, read latest LTP from `FyresIntegration.shared_data`
-    - Keep the cheapest CE and PE whose LTP lies in `[PremiumDown, PremiumUp]`
-    - When both sides are available:
-      - Compute `entry_combined = entry_call + entry_put`
-      - Compute `target_abs = entry_combined * Target%`
-      - Compute `stop_abs   = entry_combined * StopLoss%`
-      - Place CE/PE BUY orders via `place_order(...)`
-      - Log an `ENTRY` event to `order_log.csv`
-      - Save the full entry snapshot to `state.json`
+For open/pending orders, bot reprices automatically:
+- BUY side -> latest ASK
+- SELL side -> latest BID
 
-- **Live target/stop updates**
-  - While a trade is open, any manual edits you make to `Target`/`StopLoss` in the UI:
-    - Are detected on the next tick
-    - Recalculate `target_abs` / `stop_abs` from the original `entry_combined`
-    - Log a `TARGET_STOPLOSS_UPDATED` event (anchored to the entry prices)
+Current timing:
+- status/reprice poll interval: `1` second
+- failed modify retry gap: `0.5` second (up to 3 attempts)
 
-- **Exit logic**
-  - On each tick, for open positions:
-    - Read current CE/PE LTPs from `shared_data`
-    - Compute `combined = price_ce + price_pe`
-    - If `combined >= entry_combined + target_abs` → `EXIT_TARGET`
-    - Else if `combined <= entry_combined - stop_abs` → `EXIT_STOPLOSS`
-    - Independently, if current time >= `StopTime` → `EXIT_STOPTIME`
-    - Manual “Exit All” from the UI uses the latest LTPs and logs `MANUAL_EXIT`
-  - Every exit:
-    - Places SELL orders with the current LTP as limit
-    - Logs prices, target/stop and realised PnL to `order_log.csv`
-    - Removes the key from `state.json`
-    - Sets `TRADINGENABLED=FALSE` so next enable starts fresh
+Requests are synchronous in loop (waits for response before next call).
 
-Security & Safety
------------------
+---
 
-- This code is intended for **development and paper/very small live testing**, not for immediate production deployment.
-- Always validate:
-  - Position sizing
-  - Order types
-  - Exchange-specific constraints
-- Add robust logging, error handling, and risk checks before enabling real capital.
+## 7) Key Endpoints
 
-License
--------
+- `GET /` -> Symbol Settings UI
+- `POST /start-strategy` -> Start login + websocket + strategy loop
+- `POST /stop-strategy` -> Stop strategy + request websocket close
+- `GET /strategy-status` -> Running status
+- `GET /strategy-positions` -> Open strategy positions from `state.json`
+- `POST /exit-all` -> Exit all open strategy positions
+- `GET /order-log` -> Order log page
+- `GET /order-log-data` -> Order log JSON
 
-This project is private to you; no license is included. Use and modify it as you see fit for your own trading workflow.
+---
+
+## 8) Troubleshooting
+
+### Strategy starts but tracks 0 symbols
+
+Check:
+- `TRADINGENABLED` is `TRUE`
+- `StrikeRange > 0`
+- `StrikeStep > 0`
+- valid `ExpieryDate` format (`DD-MM-YYYY`)
+- valid `Symbol`/`BaseSymbol`
+- successful Fyers login
+
+### Duplicate symbol rows in settings
+
+Backend auto-cleans duplicates now.  
+Still, keep one row per symbol in imported CSV.
+
+### No entries happening
+
+Possible reasons:
+- outside `StartTime`/`StopTime`
+- no CE/PE in configured premium band
+- no websocket LTP updates
+
+Check `order_log.csv` and console logs.
+
+---
+
+## 9) Safety Note
+
+Use small qty for live testing.  
+Validate risk, lot size, and broker behavior before scaling.
 

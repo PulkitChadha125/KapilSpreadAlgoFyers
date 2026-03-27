@@ -215,6 +215,7 @@
                             <th>Target</th>
                             <th>Stop Loss</th>
                             <th>Exp Type</th>
+                            <th>Trade Type</th>
                             <th>Expiry Date</th>
                             <th>Start Time</th>
                             <th>Stop Time</th>
@@ -236,6 +237,7 @@
                                 <td>{{ row.Target }}</td>
                                 <td>{{ row.StopLoss }}</td>
                                 <td>{{ row.ExpType }}</td>
+                                <td>{{ row.TradeType or 'BUY' }}</td>
                                 <td>{{ row.ExpieryDate }}</td>
                                 <td>{{ row.StartTime }}</td>
                                 <td>{{ row.StopTime }}</td>
@@ -296,6 +298,7 @@
                                         data-target="{{ row.Target }}"
                                         data-stoploss="{{ row.StopLoss }}"
                                         data-exptype="{{ row.ExpType }}"
+                                        data-tradetype="{{ row.TradeType or 'BUY' }}"
                                         data-expierydate="{{ row.ExpieryDate }}"
                                         data-starttime="{{ row.StartTime }}"
                                         data-stoptime="{{ row.StopTime }}"
@@ -376,6 +379,10 @@
                                 <span class="text-light">{{ row.ExpieryDate }}</span>
                             </div>
                             <div class="col-6">
+                                Trade Type:
+                                <span class="text-light">{{ row.TradeType or 'BUY' }}</span>
+                            </div>
+                            <div class="col-6">
                                 Start:
                                 <span class="text-light">{{ row.StartTime }}</span>
                             </div>
@@ -418,6 +425,7 @@
                                         data-target="{{ row.Target }}"
                                         data-stoploss="{{ row.StopLoss }}"
                                     data-exptype="{{ row.ExpType }}"
+                                    data-tradetype="{{ row.TradeType or 'BUY' }}"
                                     data-expierydate="{{ row.ExpieryDate }}"
                                     data-starttime="{{ row.StartTime }}"
                                     data-stoptime="{{ row.StopTime }}"
@@ -492,6 +500,7 @@
                     <thead class="table-light">
                     <tr>
                         <th>Base Symbol</th>
+                        <th>Trade Type</th>
                         <th>Entry Symbol (CE)</th>
                         <th>Entry Symbol (PE)</th>
                         <th>Entry CE</th>
@@ -508,7 +517,7 @@
                     </thead>
                     <tbody id="inline-positions-body">
                     <tr>
-                        <td colspan="13" class="text-center text-secondary">
+                        <td colspan="14" class="text-center text-secondary">
                             No open positions from strategy.
                         </td>
                     </tr>
@@ -578,6 +587,13 @@
                             <input type="date" class="form-control" id="editExpieryDate" name="ExpieryDate">
                         </div>
                         <div class="col-md-4">
+                            <label class="form-label">Trade Type</label>
+                            <select class="form-select" id="editTradeType" name="TradeType">
+                                <option value="BUY">BUY</option>
+                                <option value="SELL">SELL</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
                             <label class="form-label">Start Time</label>
                             <input type="time" class="form-control" id="editStartTime" name="StartTime">
                         </div>
@@ -641,6 +657,8 @@
             const expTypeVal = expType === 'WEEKLY' ? 'WEEKLY' : 'MONTHLY';
             document.getElementById('editExpType').value = expTypeVal;
             document.getElementById('editOriginalExpType').value = expTypeVal;
+            const tradeType = getAttr('data-tradetype').toUpperCase();
+            document.getElementById('editTradeType').value = tradeType === 'SELL' ? 'SELL' : 'BUY';
 
             const rawDate = getAttr('data-expierydate');
             document.getElementById('editOriginalExpieryDate').value = rawDate;
@@ -678,6 +696,7 @@
                 Target: document.getElementById('editTarget').value,
                 StopLoss: document.getElementById('editStopLoss').value,
                 ExpType: document.getElementById('editExpType').value,
+                TradeType: document.getElementById('editTradeType').value,
                 ExpieryDate: document.getElementById('editExpieryDate').value,
                 OriginalExpieryDate: document.getElementById('editOriginalExpieryDate').value,
                 OriginalSymbol: document.getElementById('editOriginalSymbol').value,
@@ -932,6 +951,7 @@
             document.getElementById('editTarget').value = '';
             document.getElementById('editStopLoss').value = '';
             document.getElementById('editExpType').value = 'MONTHLY';
+            document.getElementById('editTradeType').value = 'BUY';
             document.getElementById('editExpieryDate').value = '';
             document.getElementById('editOriginalExpieryDate').value = '';
             document.getElementById('editOriginalSymbol').value = '';
@@ -970,13 +990,13 @@
             const res = await fetch('/strategy-positions');
             if (!res.ok) {
                 inlinePositionsBody.innerHTML =
-                    '<tr><td colspan="13" class="text-center text-danger">Failed to load positions.</td></tr>';
+                    '<tr><td colspan="14" class="text-center text-danger">Failed to load positions.</td></tr>';
                 return;
             }
             const data = await res.json();
             if (!Array.isArray(data) || data.length === 0) {
                 inlinePositionsBody.innerHTML =
-                    '<tr><td colspan="13" class="text-center text-secondary">No open positions from strategy.</td></tr>';
+                    '<tr><td colspan="14" class="text-center text-secondary">No open positions from strategy.</td></tr>';
                 return;
             }
             inlinePositionsBody.innerHTML = '';
@@ -985,6 +1005,7 @@
                 const pnlClass = (p.realized_pnl ?? 0) >= 0 ? 'text-success' : 'text-danger';
                 tr.innerHTML = `
                     <td>${p.base_symbol || ''}</td>
+                    <td>${(p.trade_type || 'BUY').toString().toUpperCase()}</td>
                     <td><code>${p.call_symbol || ''}</code></td>
                     <td><code>${p.put_symbol || ''}</code></td>
                     <td>${fmt2(p.entry_call)}</td>
@@ -1007,7 +1028,7 @@
             }
         } catch (e) {
             inlinePositionsBody.innerHTML =
-                '<tr><td colspan="13" class="text-center text-danger">Error loading positions.</td></tr>';
+                '<tr><td colspan="14" class="text-center text-danger">Error loading positions.</td></tr>';
         }
     }
 

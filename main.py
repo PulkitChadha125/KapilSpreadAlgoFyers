@@ -211,6 +211,7 @@ _login_creds = {}        # cached credentials for automated_login
 ORDER_LOG_COLUMNS = [
     "timestamp",
     "event",
+    "trade_type",
     "strategy_key",
     "base_symbol",
     "symbol",
@@ -266,8 +267,47 @@ def save_state(state):
         print("[STATE] Failed to write state.json:", e)
 
 
+def _normalize_trade_type(trade_type, entry_side=None) -> str:
+    """
+    Normalize trade type to BUY/SELL.
+    Falls back to entry_side when trade_type is missing/invalid.
+    """
+    tt = str(trade_type or "").strip().upper()
+    if tt in ("BUY", "SELL"):
+        return tt
+    try:
+        side = int(entry_side)
+    except Exception:
+        side = 1
+    return "SELL" if side == -1 else "BUY"
+
+
+def _calculate_pnl_values(entry_combined, exit_combined, qty, trade_type):
+    """
+    Return (pnl_abs, pnl_pct, pnl_amount) using direction-aware logic.
+    BUY  -> pnl_abs = exit - entry
+    SELL -> pnl_abs = entry - exit
+    """
+    pnl_abs = None
+    pnl_pct = None
+    pnl_amount = None
+    try:
+        entry_val = float(entry_combined)
+        exit_val = float(exit_combined)
+        qty_val = int(qty)
+        tt = _normalize_trade_type(trade_type)
+        pnl_abs = (exit_val - entry_val) if tt == "BUY" else (entry_val - exit_val)
+        if entry_val:
+            pnl_pct = (pnl_abs / entry_val) * 100.0
+        pnl_amount = pnl_abs * qty_val
+    except Exception:
+        return (None, None, None)
+    return (pnl_abs, pnl_pct, pnl_amount)
+
+
 def append_order_log(
     event: str,
+    trade_type: str = "",
     strategy_key: str = "",
     base_symbol: str | None = None,
     symbol: str | None = None,
@@ -306,6 +346,7 @@ def append_order_log(
             row = {
                 "timestamp": now_ts,
                 "event": event,
+                "trade_type": (trade_type or "").strip().upper(),
                 "strategy_key": strategy_key,
                 "base_symbol": base_symbol or "",
                 "symbol": symbol or "",
@@ -339,7 +380,25 @@ def load_trade_settings_df():
     try:
         df = pd.read_csv("TradeSettings.csv")
         df.columns = df.columns.str.strip()
-        return _dedupe_trade_settings_by_symbol(df, persist=True)
+        # Backward compatibility: old CSVs may not have TradeType.
+        added_trade_type = False
+        if "TradeType" not in df.columns:
+            df["TradeType"] = "BUY"
+            added_trade_type = True
+        else:
+            df["TradeType"] = (
+                df["TradeType"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .replace({"": "BUY", "NAN": "BUY", "NONE": "BUY"})
+            )
+            df.loc[~df["TradeType"].isin(["BUY", "SELL"]), "TradeType"] = "BUY"
+        cleaned = _dedupe_trade_settings_by_symbol(df, persist=False)
+        # Persist if we auto-added TradeType or dedupe changed row count.
+        if added_trade_type or (len(cleaned) != len(df)):
+            cleaned.to_csv("TradeSettings.csv", index=False)
+        return cleaned
     except Exception as e:
         print("Error loading TradeSettings.csv for UI:", e)
         return pd.DataFrame()
@@ -735,6 +794,9 @@ def _strategy_loop_worker():
                     except Exception:
                         quantity = 1
                     quantity = max(1, quantity)
+                    trade_type = str(row.get("TradeType", "BUY")).strip().upper()
+                    if trade_type not in ("BUY", "SELL"):
+                        trade_type = "BUY"
 
                     srec = state.get(unique_key, {"in_position": False})
 
@@ -744,6 +806,10 @@ def _strategy_loop_worker():
                         exit_qty = srec.get("quantity", 1)
                         ce_sym = srec.get("call_symbol")
                         pe_sym = srec.get("put_symbol")
+                        position_trade_type = _normalize_trade_type(srec.get("trade_type", trade_type), srec.get("entry_side"))
+                        entry_side = 1 if position_trade_type == "BUY" else -1
+                        exit_side = -1 if entry_side == 1 else 1
+                        exit_action = "sell" if exit_side == -1 else "buy"
 
                         ltp_ce = shared_data.get(ce_sym) if ce_sym else None
                         ltp_pe = shared_data.get(pe_sym) if pe_sym else None
@@ -761,11 +827,7 @@ def _strategy_loop_worker():
                             exit_combined = price_pe
 
                         entry_combined = float(srec.get("entry_combined") or 0.0)
-                        pnl_abs = None
-                        pnl_pct = None
-                        if exit_combined is not None and entry_combined:
-                            pnl_abs = exit_combined - entry_combined
-                            pnl_pct = (pnl_abs / entry_combined) * 100.0
+                        pnl_abs, pnl_pct, _ = _calculate_pnl_values(entry_combined, exit_combined, exit_qty, position_trade_type)
 
                         print(
                             f"[EXIT_STOPTIME] {unique_key} | "
@@ -774,21 +836,22 @@ def _strategy_loop_worker():
                             f"pnl_abs={pnl_abs}, pnl_pct={pnl_pct}"
                         )
 
-                        sell_ce = place_order(ce_sym, exit_qty, -1, order_type=1, limit_price=price_ce) if ce_sym else {}
-                        sell_pe = place_order(pe_sym, exit_qty, -1, order_type=1, limit_price=price_pe) if pe_sym else {}
-                        order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
-                        _ce_id = sell_ce.get("id") if isinstance(sell_ce, dict) else None
-                        _pe_id = sell_pe.get("id") if isinstance(sell_pe, dict) else None
+                        exit_ce = place_order(ce_sym, exit_qty, exit_side, order_type=1, limit_price=price_ce) if ce_sym else {}
+                        exit_pe = place_order(pe_sym, exit_qty, exit_side, order_type=1, limit_price=price_pe) if pe_sym else {}
+                        order_detail = f"CE {exit_action}: {exit_ce.get('message', exit_ce)}; PE {exit_action}: {exit_pe.get('message', exit_pe)}"
+                        _ce_id = exit_ce.get("id") if isinstance(exit_ce, dict) else None
+                        _pe_id = exit_pe.get("id") if isinstance(exit_pe, dict) else None
                         def _reprice_stoptime():
                             if _ce_id and ce_sym:
-                                _check_and_reprice_order(ce_sym, _ce_id, exit_qty, -1)
+                                _check_and_reprice_order(ce_sym, _ce_id, exit_qty, exit_side)
                             if _pe_id and pe_sym:
-                                _check_and_reprice_order(pe_sym, _pe_id, exit_qty, -1)
+                                _check_and_reprice_order(pe_sym, _pe_id, exit_qty, exit_side)
                         import threading as _th_st
                         _th_st.Thread(target=_reprice_stoptime, daemon=True).start()
-                        pnl_amount = pnl_abs * exit_qty if pnl_abs is not None else None
+                        pnl_amount = (pnl_abs * exit_qty) if pnl_abs is not None else None
                         append_order_log(
                             event="EXIT_STOPTIME",
+                            trade_type=position_trade_type,
                             strategy_key=unique_key,
                             base_symbol=base_symbol,
                             symbol=srec.get("symbol", symbol),
@@ -806,10 +869,10 @@ def _strategy_loop_worker():
                             pnl_amount=pnl_amount,
                             # Keep details focused on raw API messages for CE/PE
                             details=order_detail,
-                            ce_request=sell_ce.get("request"),
-                            ce_response=sell_ce.get("response"),
-                            pe_request=sell_pe.get("request"),
-                            pe_response=sell_pe.get("response"),
+                            ce_request=exit_ce.get("request"),
+                            ce_response=exit_ce.get("response"),
+                            pe_request=exit_pe.get("request"),
+                            pe_response=exit_pe.get("response"),
                         )
                         # Position is fully closed; clear this strategy key from state
                         srec["in_position"] = False
@@ -897,6 +960,7 @@ def _strategy_loop_worker():
                                 print("=" * 80 + "\n")
                                 append_order_log(
                                     event="NO_STRIKE_IN_RANGE",
+                                    trade_type=trade_type,
                                     strategy_key=unique_key,
                                     base_symbol=base_symbol,
                                     symbol=symbol,
@@ -908,19 +972,23 @@ def _strategy_loop_worker():
                             entry_combined = best_ce_price + best_pe_price
                             target_abs = entry_combined * (target_pct / 100.0)
                             stop_abs = entry_combined * (stop_pct / 100.0)
+                            entry_side = 1 if trade_type == "BUY" else -1
+                            target_desc = "+" if trade_type == "BUY" else "-"
+                            stop_desc = "-" if trade_type == "BUY" else "+"
 
                             print(
                                 f"[STRATEGY] ENTRY for {unique_key}: "
                                 f"CE={best_ce} @{best_ce_price}, "
                                 f"PE={best_pe} @{best_pe_price}, "
                                 f"combined={entry_combined}, "
-                                f"target+{target_abs} ({target_pct}%), "
-                                f"stop-{stop_abs} ({stop_pct}%)"
+                                f"trade_type={trade_type}, "
+                                f"target{target_desc}{target_abs} ({target_pct}%), "
+                                f"stop{stop_desc}{stop_abs} ({stop_pct}%)"
                             )
 
-                            # Place BUY orders on Fyers using LTP as limit price (LIMIT orders)
-                            order_ce = place_order(best_ce, quantity, 1, order_type=1, limit_price=best_ce_price)
-                            order_pe = place_order(best_pe, quantity, 1, order_type=1, limit_price=best_pe_price)
+                            # Place entry orders using configured TradeType (BUY=1, SELL=-1)
+                            order_ce = place_order(best_ce, quantity, entry_side, order_type=1, limit_price=best_ce_price)
+                            order_pe = place_order(best_pe, quantity, entry_side, order_type=1, limit_price=best_pe_price)
                             order_detail = f"CE order: {order_ce.get('message', order_ce)}; PE order: {order_pe.get('message', order_pe)}"
                             if order_ce.get("id"):
                                 order_detail += f" [CE id={order_ce.get('id')}]"
@@ -932,13 +1000,14 @@ def _strategy_loop_worker():
                             pe_id = order_pe.get("id")
                             def _reprice_entry():
                                 if ce_id:
-                                    _check_and_reprice_order(best_ce, ce_id, quantity, 1)
+                                    _check_and_reprice_order(best_ce, ce_id, quantity, entry_side)
                                 if pe_id:
-                                    _check_and_reprice_order(best_pe, pe_id, quantity, 1)
+                                    _check_and_reprice_order(best_pe, pe_id, quantity, entry_side)
                             threading.Thread(target=_reprice_entry, daemon=True).start()
 
                             append_order_log(
                                 event="ENTRY",
+                                trade_type=trade_type,
                                 strategy_key=unique_key,
                                 base_symbol=base_symbol,
                                 symbol=symbol,
@@ -951,7 +1020,7 @@ def _strategy_loop_worker():
                                 stop_pct=stop_pct,
                                 target_abs=target_abs,
                                 stop_abs=stop_abs,
-                                details=f"Placed BUY orders on Fyers (qty={quantity}). {order_detail}",
+                                details=f"Placed {trade_type} orders on Fyers (qty={quantity}). {order_detail}",
                                 ce_request=order_ce.get("request"),
                                 ce_response=order_ce.get("response"),
                                 pe_request=order_pe.get("request"),
@@ -976,6 +1045,8 @@ def _strategy_loop_worker():
                                 "target_abs": target_abs,
                                 "stop_abs": stop_abs,
                                 "quantity": quantity,
+                                "trade_type": trade_type,
+                                "entry_side": entry_side,
                                 "in_position": True,
                                 "entry_ts": datetime.now().isoformat(),
                             }
@@ -1003,6 +1074,10 @@ def _strategy_loop_worker():
                         entry_call = srec.get("entry_call")
                         entry_put = srec.get("entry_put")
                         entry_combined = srec.get("entry_combined", combined)
+                        position_trade_type = _normalize_trade_type(srec.get("trade_type", trade_type), srec.get("entry_side"))
+                        entry_side = 1 if position_trade_type == "BUY" else -1
+                        exit_side = -1 if entry_side == 1 else 1
+                        exit_action = "sell" if exit_side == -1 else "buy"
 
                         # Detect live updates to Target/StopLoss in TradeSettings.csv
                         old_target_pct = float(srec.get("target_pct", 0.0) or 0.0)
@@ -1023,6 +1098,7 @@ def _strategy_loop_worker():
 
                             append_order_log(
                                 event="TARGET_STOPLOSS_UPDATED",
+                                trade_type=position_trade_type,
                                 strategy_key=unique_key,
                                 base_symbol=base_symbol,
                                 symbol=symbol,
@@ -1052,31 +1128,42 @@ def _strategy_loop_worker():
                         target_abs = float(srec.get("target_abs", 0.0) or 0.0)
                         stop_abs = float(srec.get("stop_abs", 0.0) or 0.0)
 
-                        if combined >= entry_combined + target_abs and target_abs > 0:
+                        target_hit = (
+                            (combined >= entry_combined + target_abs)
+                            if position_trade_type == "BUY"
+                            else (combined <= entry_combined - target_abs)
+                        )
+                        stop_hit = (
+                            (combined <= entry_combined - stop_abs)
+                            if position_trade_type == "BUY"
+                            else (combined >= entry_combined + stop_abs)
+                        )
+
+                        if target_hit and target_abs > 0:
                             print(
                                 f"[STRATEGY] TARGET hit for {unique_key}: "
-                                f"combined={combined} >= {entry_combined + target_abs}"
+                                f"trade_type={position_trade_type}, combined={combined}, "
+                                f"target_abs={target_abs}"
                             )
                             exit_qty = srec.get("quantity", 1)
-                            sell_ce = place_order(ce_sym, exit_qty, -1, order_type=1, limit_price=price_ce)
-                            sell_pe = place_order(pe_sym, exit_qty, -1, order_type=1, limit_price=price_pe)
-                            order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
-                            _tid_ce = sell_ce.get("id") if isinstance(sell_ce, dict) else None
-                            _tid_pe = sell_pe.get("id") if isinstance(sell_pe, dict) else None
+                            exit_ce = place_order(ce_sym, exit_qty, exit_side, order_type=1, limit_price=price_ce)
+                            exit_pe = place_order(pe_sym, exit_qty, exit_side, order_type=1, limit_price=price_pe)
+                            order_detail = f"CE {exit_action}: {exit_ce.get('message', exit_ce)}; PE {exit_action}: {exit_pe.get('message', exit_pe)}"
+                            _tid_ce = exit_ce.get("id") if isinstance(exit_ce, dict) else None
+                            _tid_pe = exit_pe.get("id") if isinstance(exit_pe, dict) else None
                             def _reprice_target():
                                 if _tid_ce and ce_sym:
-                                    _check_and_reprice_order(ce_sym, _tid_ce, exit_qty, -1)
+                                    _check_and_reprice_order(ce_sym, _tid_ce, exit_qty, exit_side)
                                 if _tid_pe and pe_sym:
-                                    _check_and_reprice_order(pe_sym, _tid_pe, exit_qty, -1)
+                                    _check_and_reprice_order(pe_sym, _tid_pe, exit_qty, exit_side)
                             import threading as _t2
                             _t2.Thread(target=_reprice_target, daemon=True).start()
 
-                            pnl_abs = combined - entry_combined if entry_combined else None
-                            pnl_pct = (pnl_abs / entry_combined) * 100.0 if (pnl_abs is not None and entry_combined) else None
-                            pnl_amount = pnl_abs * exit_qty if pnl_abs is not None else None
+                            pnl_abs, pnl_pct, pnl_amount = _calculate_pnl_values(entry_combined, combined, exit_qty, position_trade_type)
 
                             append_order_log(
                                 event="EXIT_TARGET",
+                                trade_type=position_trade_type,
                                 strategy_key=unique_key,
                                 base_symbol=base_symbol,
                                 symbol=symbol,
@@ -1093,40 +1180,40 @@ def _strategy_loop_worker():
                                 pnl_pct=pnl_pct,
                                 pnl_amount=pnl_amount,
                                 details=order_detail,
-                                ce_request=sell_ce.get("request"),
-                                ce_response=sell_ce.get("response"),
-                                pe_request=sell_pe.get("request"),
-                                pe_response=sell_pe.get("response"),
+                                ce_request=exit_ce.get("request"),
+                                ce_response=exit_ce.get("response"),
+                                pe_request=exit_pe.get("request"),
+                                pe_response=exit_pe.get("response"),
                             )
                             # Target hit; clear this strategy key so a future re-enable starts fresh
                             srec["in_position"] = False
                             _clear_state_for_key(state, unique_key)
                             df.at[idx, "TRADINGENABLED"] = "FALSE"
-                        elif combined <= entry_combined - stop_abs and stop_abs > 0:
+                        elif stop_hit and stop_abs > 0:
                             print(
                                 f"[STRATEGY] STOP-LOSS hit for {unique_key}: "
-                                f"combined={combined} <= {entry_combined - stop_abs}"
+                                f"trade_type={position_trade_type}, combined={combined}, "
+                                f"stop_abs={stop_abs}"
                             )
                             exit_qty = srec.get("quantity", 1)
-                            sell_ce = place_order(ce_sym, exit_qty, -1, order_type=1, limit_price=price_ce)
-                            sell_pe = place_order(pe_sym, exit_qty, -1, order_type=1, limit_price=price_pe)
-                            order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
-                            _tid_ce = sell_ce.get("id") if isinstance(sell_ce, dict) else None
-                            _tid_pe = sell_pe.get("id") if isinstance(sell_pe, dict) else None
+                            exit_ce = place_order(ce_sym, exit_qty, exit_side, order_type=1, limit_price=price_ce)
+                            exit_pe = place_order(pe_sym, exit_qty, exit_side, order_type=1, limit_price=price_pe)
+                            order_detail = f"CE {exit_action}: {exit_ce.get('message', exit_ce)}; PE {exit_action}: {exit_pe.get('message', exit_pe)}"
+                            _tid_ce = exit_ce.get("id") if isinstance(exit_ce, dict) else None
+                            _tid_pe = exit_pe.get("id") if isinstance(exit_pe, dict) else None
                             def _reprice_sl():
                                 if _tid_ce and ce_sym:
-                                    _check_and_reprice_order(ce_sym, _tid_ce, exit_qty, -1)
+                                    _check_and_reprice_order(ce_sym, _tid_ce, exit_qty, exit_side)
                                 if _tid_pe and pe_sym:
-                                    _check_and_reprice_order(pe_sym, _tid_pe, exit_qty, -1)
+                                    _check_and_reprice_order(pe_sym, _tid_pe, exit_qty, exit_side)
                             import threading as _t3
                             _t3.Thread(target=_reprice_sl, daemon=True).start()
 
-                            pnl_abs = combined - entry_combined if entry_combined else None
-                            pnl_pct = (pnl_abs / entry_combined) * 100.0 if (pnl_abs is not None and entry_combined) else None
-                            pnl_amount = pnl_abs * exit_qty if pnl_abs is not None else None
+                            pnl_abs, pnl_pct, pnl_amount = _calculate_pnl_values(entry_combined, combined, exit_qty, position_trade_type)
 
                             append_order_log(
                                 event="EXIT_STOPLOSS",
+                                trade_type=position_trade_type,
                                 strategy_key=unique_key,
                                 base_symbol=base_symbol,
                                 symbol=symbol,
@@ -1143,10 +1230,10 @@ def _strategy_loop_worker():
                                 pnl_pct=pnl_pct,
                                 pnl_amount=pnl_amount,
                                 details=order_detail,
-                                ce_request=sell_ce.get("request"),
-                                ce_response=sell_ce.get("response"),
-                                pe_request=sell_pe.get("request"),
-                                pe_response=sell_pe.get("response"),
+                                ce_request=exit_ce.get("request"),
+                                ce_response=exit_ce.get("response"),
+                                pe_request=exit_pe.get("request"),
+                                pe_response=exit_pe.get("response"),
                             )
                             # Stop-loss hit; clear this strategy key so a future re-enable starts fresh
                             srec["in_position"] = False
@@ -1244,9 +1331,16 @@ def strategy_positions():
             ):
                 e_ce = float(entry_call)
                 e_pe = float(entry_put)
-                # Realized P&L per leg = (current - entry) * quantity
-                realized_ce = (price_ce - e_ce) * qty
-                realized_pe = (price_pe - e_pe) * qty
+                # Backward-compatible trade type resolution:
+                # prefer stored trade_type, otherwise infer from entry_side.
+                position_trade_type = _normalize_trade_type(rec.get("trade_type"), rec.get("entry_side"))
+                # Mark-to-market P&L per leg based on trade direction.
+                if position_trade_type == "BUY":
+                    realized_ce = (price_ce - e_ce) * qty
+                    realized_pe = (price_pe - e_pe) * qty
+                else:
+                    realized_ce = (e_ce - price_ce) * qty
+                    realized_pe = (e_pe - price_pe) * qty
                 realized_pnl = realized_ce + realized_pe
 
                 entry_combined = float(rec.get("entry_combined") or (e_ce + e_pe))
@@ -1274,6 +1368,7 @@ def strategy_positions():
                 "stop_pct": rec.get("stop_pct"),
                 "target_abs": rec.get("target_abs"),
                 "stop_abs": rec.get("stop_abs"),
+                "trade_type": rec.get("trade_type", "BUY"),
                 "realized_pnl": realized_pnl,
                 "realized_pnl_pct": realized_pnl_pct,
             }
@@ -1353,7 +1448,7 @@ def stop_strategy():
 @app.route("/exit-all", methods=["POST"])
 def exit_all():
     """
-    Exit All: close strategy positions (place SELL orders) and log. Optional ?symbol= or body.symbol to exit only that symbol.
+    Exit All: close strategy positions and log. Optional ?symbol= or body.symbol to exit only that symbol.
     """
     payload = request.get_json(silent=True) or {}
     filter_symbol = (payload.get("symbol") or request.args.get("symbol") or "").strip()
@@ -1385,28 +1480,27 @@ def exit_all():
             exit_combined = price_pe
 
         entry_combined = float(srec.get("entry_combined") or 0.0)
-        pnl_abs = None
-        pnl_pct = None
-        pnl_amount = None
-        if exit_combined is not None and entry_combined:
-            pnl_abs = exit_combined - entry_combined
-            pnl_pct = (pnl_abs / entry_combined) * 100.0
-            pnl_amount = pnl_abs * qty
+        position_trade_type = _normalize_trade_type(srec.get("trade_type"), srec.get("entry_side"))
+        entry_side = 1 if position_trade_type == "BUY" else -1
+        exit_side = -1 if entry_side == 1 else 1
+        exit_action = "sell" if exit_side == -1 else "buy"
+        pnl_abs, pnl_pct, pnl_amount = _calculate_pnl_values(entry_combined, exit_combined, qty, position_trade_type)
 
-        sell_ce = place_order(ce_sym, qty, -1, order_type=1, limit_price=price_ce) if ce_sym else {}
-        sell_pe = place_order(pe_sym, qty, -1, order_type=1, limit_price=price_pe) if pe_sym else {}
-        order_detail = f"CE sell: {sell_ce.get('message', sell_ce)}; PE sell: {sell_pe.get('message', sell_pe)}"
-        _m_ce_id = sell_ce.get("id") if isinstance(sell_ce, dict) else None
-        _m_pe_id = sell_pe.get("id") if isinstance(sell_pe, dict) else None
+        exit_ce = place_order(ce_sym, qty, exit_side, order_type=1, limit_price=price_ce) if ce_sym else {}
+        exit_pe = place_order(pe_sym, qty, exit_side, order_type=1, limit_price=price_pe) if pe_sym else {}
+        order_detail = f"CE {exit_action}: {exit_ce.get('message', exit_ce)}; PE {exit_action}: {exit_pe.get('message', exit_pe)}"
+        _m_ce_id = exit_ce.get("id") if isinstance(exit_ce, dict) else None
+        _m_pe_id = exit_pe.get("id") if isinstance(exit_pe, dict) else None
         def _reprice_manual():
             if _m_ce_id and ce_sym:
-                _check_and_reprice_order(ce_sym, _m_ce_id, qty, -1)
+                _check_and_reprice_order(ce_sym, _m_ce_id, qty, exit_side)
             if _m_pe_id and pe_sym:
-                _check_and_reprice_order(pe_sym, _m_pe_id, qty, -1)
+                _check_and_reprice_order(pe_sym, _m_pe_id, qty, exit_side)
         import threading as _t4
         _t4.Thread(target=_reprice_manual, daemon=True).start()
         append_order_log(
             event="MANUAL_EXIT",
+            trade_type=position_trade_type,
             strategy_key=key,
             base_symbol=srec.get("base_symbol"),
             symbol=srec.get("symbol"),
@@ -1421,10 +1515,10 @@ def exit_all():
             pnl_pct=pnl_pct,
             pnl_amount=pnl_amount,
             details=order_detail,
-            ce_request=sell_ce.get("request"),
-            ce_response=sell_ce.get("response"),
-            pe_request=sell_pe.get("request"),
-            pe_response=sell_pe.get("response"),
+            ce_request=exit_ce.get("request"),
+            ce_response=exit_ce.get("response"),
+            pe_request=exit_pe.get("request"),
+            pe_response=exit_pe.get("response"),
         )
         # Manual Exit All: position is closed, so clear the strategy key from state
         srec["in_position"] = False
@@ -1601,6 +1695,17 @@ def import_settings():
     try:
         df = pd.read_csv(file)
         df.columns = df.columns.str.strip()
+        if "TradeType" not in df.columns:
+            df["TradeType"] = "BUY"
+        else:
+            df["TradeType"] = (
+                df["TradeType"]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .replace({"": "BUY", "NAN": "BUY", "NONE": "BUY"})
+            )
+            df.loc[~df["TradeType"].isin(["BUY", "SELL"]), "TradeType"] = "BUY"
     except Exception as e:
         print("[UI] Failed to parse uploaded CSV in import_settings:", e)
         return redirect(url_for("symbol_settings"))
@@ -1683,6 +1788,7 @@ def save_setting():
                 "StopLoss",
                 "ExpieryDate",
                 "ExpType",
+                "TradeType",
                 "StartTime",
                 "StopTime",
                 "TRADINGENABLED",
@@ -1715,6 +1821,9 @@ def save_setting():
     exp_type = str(payload.get("ExpType", "MONTHLY")).strip().upper()
     if exp_type not in ("MONTHLY", "WEEKLY"):
         exp_type = "MONTHLY"
+    trade_type = str(payload.get("TradeType", "BUY")).strip().upper()
+    if trade_type not in ("BUY", "SELL"):
+        trade_type = "BUY"
 
     raw_date = str(payload.get("ExpieryDate", "")).strip()
     ex_date_out = ""
@@ -1758,6 +1867,7 @@ def save_setting():
         "StopLoss": stop_loss,
         "ExpieryDate": ex_date_out,
         "ExpType": exp_type,
+        "TradeType": trade_type,
         "StartTime": start_time,
         "StopTime": stop_time,
         "TRADINGENABLED": trading_enabled,
