@@ -648,7 +648,16 @@ def close_fyres_websocket():
     try:
         if data_socket is not None:
             print("[WS] Closing FyersDataSocket connection...")
+            # Ensure the client will NOT auto-reconnect once we ask it to close.
+            try:
+                setattr(data_socket, "reconnect", False)
+            except Exception:
+                # If the attribute is missing/readonly we still attempt close.
+                pass
+            # Ask the socket to close its underlying websocket connection.
             data_socket.close_connection()
+            # Drop our reference so a fresh socket can be created on next start.
+            data_socket = None
         else:
             print("[WS] close_fyres_websocket called but no active socket.")
     except Exception as e:
