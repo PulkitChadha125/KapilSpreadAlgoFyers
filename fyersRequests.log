@@ -604,3 +604,4 @@
 {"level":"DEBUG","location":"[post_call:99] fyersModel","message":{"Status Code":200,"API":"/orders/sync"},"timestamp":"2026-03-18 14:44:06,925+0530","service":"FyersAPIRequest"}
 {"level":"DEBUG","location":"[get_call:158] fyersModel","message":{"Status Code":200,"API":"/orders"},"timestamp":"2026-03-18 14:44:08,470+0530","service":"FyersAPIRequest"}
 {"level":"DEBUG","location":"[get_call:158] fyersModel","message":{"Status Code":200,"API":"/quotes"},"timestamp":"2026-03-18 14:44:08,508+0530","service":"FyersAPIRequest"}
+{"level":"DEBUG","location":"[get_call:158] fyersModel","message":{"Status Code":200,"API":"/profile"},"timestamp":"2026-04-06 14:51:18,340+0530","service":"FyersAPIRequest"}

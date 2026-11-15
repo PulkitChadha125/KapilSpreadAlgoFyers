@@ -57,6 +57,9 @@ access_token=None
 fyers=None
 shared_data = {}
 shared_data_2 = {}
+# Keep websocket tick logs enabled by default for live visibility.
+# Set VERBOSE_LTP_STREAM=0 to mute.
+VERBOSE_LTP_STREAM = str(os.getenv("VERBOSE_LTP_STREAM", "1")).strip().lower() in ("1", "true", "yes", "y")
 # Keep a reference to the live data socket so we can close it cleanly
 data_socket = None
 # Lock to ensure thread-safe access to the shared data
@@ -85,34 +88,104 @@ def automated_login(client_id,secret_key,FY_ID,TOTP_KEY,PIN,redirect_uri):
     URL_SEND_LOGIN_OTP = "https://api-t2.fyers.in/vagator/v2/send_login_otp_v2"
     res = requests.post(url=URL_SEND_LOGIN_OTP, json={"fy_id": getEncodedString(FY_ID), "app_id": "2"}).json()
     print(res)
+    if not isinstance(res, dict) or "request_key" not in res:
+        raise RuntimeError(f"Fyers OTP send failed: {res}")
 
     if datetime.now().second % 30 > 27: sleep(5)
     URL_VERIFY_OTP = "https://api-t2.fyers.in/vagator/v2/verify_otp"
-    res2 = requests.post(url=URL_VERIFY_OTP,
-                         json={"request_key": res["request_key"], "otp": pyotp.TOTP(TOTP_KEY).now()}).json()
+    res2 = requests.post(
+        url=URL_VERIFY_OTP,
+        json={"request_key": res["request_key"], "otp": pyotp.TOTP(TOTP_KEY).now()},
+    ).json()
     print(res2)
+    if not isinstance(res2, dict) or "request_key" not in res2:
+        raise RuntimeError(f"Fyers OTP verify failed: {res2}")
 
     ses = requests.Session()
     URL_VERIFY_OTP2 = "https://api-t2.fyers.in/vagator/v2/verify_pin_v2"
     payload2 = {"request_key": res2["request_key"], "identity_type": "pin", "identifier": getEncodedString(PIN)}
-    res3 = ses.post(url=URL_VERIFY_OTP2, json=payload2).json()
-    print("res3: ",res3)
+    pin_res = ses.post(url=URL_VERIFY_OTP2, json=payload2).json()
+    print("res3: ",pin_res)
+    if not isinstance(pin_res, dict) or "data" not in pin_res or "access_token" not in (pin_res.get("data") or {}):
+        raise RuntimeError(f"Fyers PIN verify failed: {pin_res}")
 
     ses.headers.update({
-        'authorization': f"Bearer {res3['data']['access_token']}"
+        'authorization': f"Bearer {pin_res['data']['access_token']}"
     })
 
     TOKENURL = "https://api-t1.fyers.in/api/v3/token"
-    payload3 = {"fyers_id": FY_ID,
-                "app_id": client_id[:-4],
-                "redirect_uri": redirect_uri,
-                "appType": "100", "code_challenge": "",
-                "state": "None", "scope": "", "nonce": "", "response_type": "code", "create_cookie": True}
+    # Different Fyers apps/accounts can require different appType values.
+    # Derive preferred appType from client_id suffix (e.g. ABCDEF1234-200 -> appType=200).
+    # app_id should normally be the base id (without "-xxx" suffix).
+    app_id_candidates = []
+    cid = str(client_id or "").strip()
+    suffix_type = None
+    if cid:
+        if "-" in cid:
+            base_part, suffix_part = cid.split("-", 1)
+            if base_part:
+                app_id_candidates.append(base_part)
+            if suffix_part.isdigit():
+                suffix_type = suffix_part
+        else:
+            app_id_candidates.append(cid)
+        # Keep full client id as a low-priority fallback.
+        app_id_candidates.append(cid)
+    # De-duplicate while preserving order
+    app_id_candidates = list(dict.fromkeys([x for x in app_id_candidates if x]))
+    app_type_candidates = []
+    if suffix_type:
+        app_type_candidates.append(suffix_type)
+    app_type_candidates.extend(["100", "200", "2", "1"])
+    app_type_candidates = list(dict.fromkeys(app_type_candidates))
 
-    res3 = ses.post(url=TOKENURL, json=payload3).json()
-    url = res3['Url']
+    token_res = None
+    url = None
+    last_error = None
+    for app_id_candidate in app_id_candidates:
+        for app_type_candidate in app_type_candidates:
+            payload3 = {
+                "fyers_id": FY_ID,
+                "app_id": app_id_candidate,
+                "redirect_uri": redirect_uri,
+                "appType": app_type_candidate,
+                "code_challenge": "",
+                "state": "None",
+                "scope": "",
+                "nonce": "",
+                "response_type": "code",
+                "create_cookie": True,
+            }
+            token_res = ses.post(url=TOKENURL, json=payload3).json()
+            url = (
+                token_res.get("Url")
+                or token_res.get("url")
+                or ((token_res.get("data") or {}).get("Url"))
+                or ((token_res.get("data") or {}).get("url"))
+            )
+            if url:
+                print(f"[LOGIN] Token URL received using app_id={app_id_candidate}, appType={app_type_candidate}")
+                break
+
+            msg = str((token_res or {}).get("message", "")).lower()
+            code = (token_res or {}).get("code")
+            last_error = token_res
+            # Continue trying fallback combinations for app-type mismatch or missing URL.
+            if ("apptype mismatch" in msg) or (code == -16):
+                print(f"[LOGIN] Token request mismatch for app_id={app_id_candidate}, appType={app_type_candidate}: {token_res}")
+                continue
+            # For any other error, still continue through matrix once before failing.
+            print(f"[LOGIN] Token request failed for app_id={app_id_candidate}, appType={app_type_candidate}: {token_res}")
+        if url:
+            break
+
+    if not url:
+        raise RuntimeError(f"Fyers token URL missing in response: {last_error or token_res}")
     parsed = urlparse(url)
-    auth_code = parse_qs(parsed.query)['auth_code'][0]
+    auth_code_list = parse_qs(parsed.query).get("auth_code")
+    if not auth_code_list:
+        raise RuntimeError(f"auth_code not found in token redirect URL: {url}")
+    auth_code = auth_code_list[0]
     grant_type = "authorization_code"
 
     response_type = "code"
@@ -126,6 +199,8 @@ def automated_login(client_id,secret_key,FY_ID,TOTP_KEY,PIN,redirect_uri):
     )
     session.set_token(auth_code)
     response = session.generate_token()
+    if not isinstance(response, dict) or "access_token" not in response:
+        raise RuntimeError(f"Fyers access_token generation failed: {response}")
     access_token = response['access_token']
     print("access_token: ",access_token)
     fyers = fyersModel.FyersModel(client_id=client_id, is_async=False, token=access_token, log_path=os.getcwd())
@@ -574,9 +649,10 @@ def fyres_websocket(symbollist):
             symbol = message['symbol']
             ltp = message['ltp']
             shared_data[symbol] = ltp
-            # Print live LTP stream for debugging/monitoring
-            ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            print(f"[LTP] {ts} | {symbol} -> {ltp}")
+            # Print live LTP stream only when explicitly enabled.
+            if VERBOSE_LTP_STREAM:
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                print(f"[LTP] {ts} | {symbol} -> {ltp}")
 
 
 

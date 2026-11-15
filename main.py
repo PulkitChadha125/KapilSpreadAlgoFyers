@@ -421,6 +421,40 @@ def _safe_int_from_csv(value, default):
         return default
 
 
+def _normalize_expiry_str(value) -> str:
+    """
+    Normalize expiry from CSV/UI into dd-mm-YYYY so strategy keys stay consistent.
+    Accepts common forms like:
+      - 07-04-2026
+      - 2026-04-07
+      - 2026-04-07 00:00:00
+      - datetime/date-like values
+    """
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if not s or s.upper() == "NAN":
+        return ""
+
+    for fmt in ("%d-%m-%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%d-%m-%Y")
+        except Exception:
+            pass
+    return s
+
+
+def _make_strategy_key(symbol: str, exp_type: str, expiry_value) -> str:
+    """
+    Build a stable key used across build/loop/state:
+    Symbol|ExpType|ExpieryDate(normalized)
+    """
+    sym = str(symbol or "").strip()
+    et = str(exp_type or "").strip().upper()
+    ex = _normalize_expiry_str(expiry_value)
+    return f"{sym}|{et}|{ex}"
+
+
 def _dedupe_trade_settings_by_symbol(df: pd.DataFrame, persist: bool = False) -> pd.DataFrame:
     """
     Enforce one row per Symbol (case-insensitive, trimmed).
@@ -619,7 +653,7 @@ def build_option_subscriptions():
                 print(f"[STRATEGY] Skipping {symbol}: invalid StrikeRange/StrikeStep ({strike_range}, {strike_step})")
                 continue
 
-            expiry_str = str(row.get("ExpieryDate", "")).strip()
+            expiry_str = _normalize_expiry_str(row.get("ExpieryDate", ""))
             if not expiry_str:
                 print(f"[STRATEGY] Skipping {symbol}: missing ExpieryDate")
                 continue
@@ -666,7 +700,7 @@ def build_option_subscriptions():
                 dd = expiry_date.strftime("%d")
                 new_date_string = f"{yy}{month_char}{dd}"
 
-            unique_key = f"{symbol_raw.strip()}|{exp_type}|{expiry_str}"
+            unique_key = _make_strategy_key(symbol_raw.strip(), exp_type, expiry_str)
 
             for strike in strikes:
                 strike_int = int(strike)
@@ -759,8 +793,8 @@ def _strategy_loop_worker():
                     if exp_type not in ("MONTHLY", "WEEKLY"):
                         continue
 
-                    expiry_str = str(row.get("ExpieryDate", "")).strip()
-                    unique_key = f"{symbol}|{exp_type}|{expiry_str}"
+                    expiry_str = _normalize_expiry_str(row.get("ExpieryDate", ""))
+                    unique_key = _make_strategy_key(symbol, exp_type, expiry_str)
 
                     start_time_str = str(row.get("StartTime", "")).strip() or "09:15"
                     stop_time_str = str(row.get("StopTime", "")).strip() or "15:30"
@@ -880,14 +914,34 @@ def _strategy_loop_worker():
                         df.at[idx, "TRADINGENABLED"] = "FALSE"
                         continue
 
-                    # Outside start/stop window: do nothing
+                    # Outside start/stop window: skip with explicit reason.
                     if not (start_time <= current_time <= stop_time):
+                        print(
+                            f"[ENTRY_SKIP_TIME] {unique_key} | now={current_time.strftime('%H:%M:%S')} "
+                            f"| window={start_time.strftime('%H:%M')}->{stop_time.strftime('%H:%M')}"
+                        )
                         continue
 
                     # Ensure we have option symbols built for this row (key = Symbol|ExpType|ExpieryDate)
                     option_list = option_key_by_symbol.get(unique_key)
                     if not option_list:
+                        # Important diagnostic: if this prints, build key and loop key don't match
+                        # (or subscriptions were not built for this row), so entry logic is skipped.
+                        print(
+                            f"[STRATEGY][SKIP_NO_OPTION_LIST] key={unique_key} "
+                            f"| symbol={symbol} | exp_type={exp_type} | expiry={expiry_str} "
+                            f"| available_keys={len(option_key_by_symbol)}"
+                        )
                         continue
+
+                    # If websocket has not delivered ticks yet, make it visible.
+                    # (entry scan will still run and report ltp_missing counts, but this
+                    # quick signal explains why no shortlist appears immediately after start).
+                    if not shared_data:
+                        print(
+                            f"[ENTRY_WAITING_TICKS] {unique_key} | option_symbols={len(option_list)} "
+                            f"| websocket data not received yet"
+                        )
 
                     # If not yet in position, build entry at first opportunity
                     if not srec.get("in_position"):
@@ -906,10 +960,16 @@ def _strategy_loop_worker():
                         best_ce_price = None
                         best_pe = None
                         best_pe_price = None
+                        ce_in_range_count = 0
+                        pe_in_range_count = 0
+                        total_scanned = 0
+                        ltp_missing_count = 0
 
                         for opt_symbol in option_list:
+                            total_scanned += 1
                             ltp = shared_data.get(opt_symbol)
                             if ltp is None:
+                                ltp_missing_count += 1
                                 continue
                             try:
                                 price = float(ltp)
@@ -923,27 +983,56 @@ def _strategy_loop_worker():
                                 continue
 
                             if opt_symbol.endswith("CE"):
+                                ce_in_range_count += 1
                                 if best_ce_price is None or price < best_ce_price:
                                     best_ce_price = price
                                     best_ce = opt_symbol
+                                    print(
+                                        f"[SHORTLIST_CE] {unique_key} | "
+                                        f"candidate={best_ce} @ {best_ce_price} "
+                                        f"(range [{prem_down}, {prem_up}])"
+                                    )
                             elif opt_symbol.endswith("PE"):
+                                pe_in_range_count += 1
                                 if best_pe_price is None or price < best_pe_price:
                                     best_pe_price = price
                                     best_pe = opt_symbol
+                                    print(
+                                        f"[SHORTLIST_PE] {unique_key} | "
+                                        f"candidate={best_pe} @ {best_pe_price} "
+                                        f"(range [{prem_down}, {prem_up}])"
+                                    )
+
+                        # Always print a single explicit entry-scan summary so the console
+                        # clearly shows why entry did or did not happen on this tick.
+                        if best_ce and best_pe:
+                            scan_reason = "both CE and PE in range"
+                        elif (not best_ce) and (not best_pe):
+                            scan_reason = "CE not in range and PE not in range"
+                        elif not best_ce:
+                            scan_reason = "CE not in range"
+                        else:
+                            scan_reason = "PE not in range"
+                        print(
+                            f"[ENTRY_SCAN] {unique_key} | range [{prem_down}, {prem_up}] | "
+                            f"{scan_reason} | ce_in_range={ce_in_range_count}, pe_in_range={pe_in_range_count} | "
+                            f"ltp_missing={ltp_missing_count}/{total_scanned}"
+                        )
 
                         if not (best_ce and best_pe):
-                            # Always check entry condition every tick (1 second) and print to console,
-                            # but throttle CSV logging to once per 60s per strategy key.
-                            reason = []
-                            if not best_ce:
-                                reason.append("no CE")
-                            if not best_pe:
-                                reason.append("no PE")
+                            # Always check entry condition every tick (1 second) and print to console.
+                            # This is intentionally explicit so it's clear which side is missing.
+                            if not best_ce and not best_pe:
+                                missing_msg = "CE not in range and PE not in range"
+                            elif not best_ce:
+                                missing_msg = "CE not in range"
+                            else:
+                                missing_msg = "PE not in range"
 
-                            # Console message every second while no strike is in range
                             print(
                                 f"[NO_STRIKE_IN_RANGE] {unique_key} | "
-                                f"range [{prem_down}, {prem_up}] | missing: {', '.join(reason)}"
+                                f"range [{prem_down}, {prem_up}] | {missing_msg} | "
+                                f"ce_in_range={ce_in_range_count}, pe_in_range={pe_in_range_count}"
                             )
 
                             # CSV/order_log entry at most once per 60 seconds
@@ -955,7 +1044,8 @@ def _strategy_loop_worker():
                                 print("\n" + "=" * 80)
                                 print(
                                     f"[NO_STRIKE_IN_RANGE LOGGED] {unique_key} | "
-                                    f"range [{prem_down}, {prem_up}] | missing: {', '.join(reason)}"
+                                    f"range [{prem_down}, {prem_up}] | {missing_msg} | "
+                                    f"ce_in_range={ce_in_range_count}, pe_in_range={pe_in_range_count}"
                                 )
                                 print("=" * 80 + "\n")
                                 append_order_log(
@@ -964,11 +1054,21 @@ def _strategy_loop_worker():
                                     strategy_key=unique_key,
                                     base_symbol=base_symbol,
                                     symbol=symbol,
-                                    details=f"No strike in premium range [{prem_down}, {prem_up}] for {base_symbol}. Missing: {', '.join(reason)}. Waiting for LTP in range.",
+                                    details=(
+                                        f"No strike in premium range [{prem_down}, {prem_up}] for {base_symbol}. "
+                                        f"{missing_msg}. ce_in_range={ce_in_range_count}, pe_in_range={pe_in_range_count}. "
+                                        f"Waiting for LTP in range."
+                                    ),
                                 )
                             continue
 
                         if best_ce and best_pe:
+                            print(
+                                f"[SHORTLIST_READY] {unique_key} | "
+                                f"CE={best_ce} @ {best_ce_price}, "
+                                f"PE={best_pe} @ {best_pe_price} | "
+                                f"range [{prem_down}, {prem_up}]"
+                            )
                             entry_combined = best_ce_price + best_pe_price
                             target_abs = entry_combined * (target_pct / 100.0)
                             stop_abs = entry_combined * (stop_pct / 100.0)
@@ -1410,7 +1510,12 @@ def start_strategy():
     }
 
     # Fresh login before starting the strategy + websocket.
-    automated_login(**_login_creds)
+    try:
+        automated_login(**_login_creds)
+    except Exception as e:
+        print("[STRATEGY] automated_login failed:", e)
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": f"Fyers login failed: {e}"}), 500
     # Remember today's login date in IST so the 09:00 IST scheduler can compare correctly.
     ist_now = dt.datetime.utcnow() + dt.timedelta(hours=5, minutes=30)
     _last_login_date = ist_now.date()
